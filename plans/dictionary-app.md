@@ -40,14 +40,16 @@ Implement these boundaries as modules within one application, with a UI-independ
 
 ### Navigation and interaction
 
-- **Dictionary:** multiline input, Auto / English → 中文 / 中文 → English direction selection, submit/cancel, and a readable Markdown result. Show recent history alongside the result when space permits.
+- **Dictionary:** compact input that grows for multiline text, Auto / English → 中文 / 中文 → English direction selection, a persistent Look up action, a per-entry Stop control beside running status, and a Markdown result occupying most of the window. Keep recent history in a narrow, collapsible sidebar. Each entry shows input and translation preview; show Thinking / Generating / Failed inline with the preview only when applicable, with its icon aligned to the first text line. Keep token breakdowns, configuration, and timestamps in an entry-details popover. Use labeled or accessible icon controls for common actions. Show available CLI thinking summaries and working events in an expanded live activity section, then automatically collapse it to a reopenable Worked section when complete.
 - **History:** searchable saved queries with direction, date, status, model, effort, tokens, and duration. Opening a result reads SQLite. Retry or regenerate explicitly creates another attempt.
 - **Analysis:** date filters, summary values, and charts. Chart selections can narrow the underlying request list.
 - **Settings modal:** model picker, Low / Med / High / Max effort control, CLI executable location, selected skill, connection diagnostics, and appearance. Persist app preferences locally.
 
-Each submitted lookup has fresh model context. Previously viewed history is never silently appended to a new request. The first version runs one lookup at a time; the input remains editable, while Submit is disabled until the current attempt ends or is canceled. Switching views does not cancel work.
+Searching an expression first opens its running or queued attempt when one exists, otherwise its latest successful cached result, before connection checks and without another attempt or usage. Match NFC-normalized text after trimming surrounding whitespace; preserve case, punctuation, and internal whitespace. Cache lookup covers all saved history. Regenerate, beside Copy, explicitly creates another attempt under the selected lookup using its original input and current settings. Failed regenerations leave the last successful cached result available.
 
-Use Command+Enter to submit multiline input, Command+L to focus it, and Command+, for Settings. Respect Chinese IME composition before handling submission keys. Keep result text selectable and support copying the entry as Markdown.
+Each newly generated lookup has fresh model context. Previously viewed history is never silently appended to a new request. The first version allows three concurrent CLI processes and persists additional requests in a FIFO queue. Look up always submits the current input; active and queued keys are reserved before admitting another request, so repeated clicks reuse one attempt. Regenerate bypasses saved cache but shares this active-key guard. Stop beside the selected entry’s status cancels only that attempt. Queued cancellation never starts a process. Switching views or choosing New Lookup does not cancel work, and background events never navigate away from the selected entry. Each attempt owns its output, activity, cancellation, usage, and timing. Request IDs discard stale navigation responses.
+
+Use Enter to submit and Shift+Enter to insert a newline; Command+Enter remains a submission shortcut. Use Command+L to focus the input, Command+B to toggle history, and Command+, for Settings. Respect Chinese IME composition before handling submission keys. Keep result text selectable and support copying the entry as Markdown.
 
 Auto direction uses a local script heuristic and exposes the resolved direction before submission. Ambiguous or mixed input requires a direction choice. Preserve the original input, including punctuation and line breaks.
 
@@ -66,9 +68,9 @@ The process adapter will:
 
 Require a valid terminal success event, usable final answer, and successful process outcome before reporting a fully successful attempt. Preserve any reported usage and partial result when an attempt later fails. Distinguish a protocol-incomplete run from a normal completed entry. Reasoning and tool events may inform progress, but are not dictionary answer content.
 
-The documented stream does not promise token-by-token answer delivery for every CLI version. Phase 1 must characterize the installed version. Render partial answer updates if available; otherwise show progress until an answer item arrives. Do not simulate streaming or label the first protocol event as the first answer token.
+The documented stream does not promise token-by-token answer delivery for every CLI version. Phase 1 must characterize the installed version. Render partial answer updates if available; otherwise show a running indicator until an answer item arrives. Request available reasoning summaries with `model_reasoning_summary="auto"` and `hide_agent_reasoning=false`. The activity disclosure contains only reported summaries, commentary, commands/output, tool identifiers, queries, plans, and changed paths; do not add synthetic waiting entries. Hide the disclosure entirely when no real activity exists, including older saved placeholder messages. Do not simulate streaming or label the first protocol event as the first answer token.
 
-Cancellation terminates and reaps the process, including owned descendants where applicable. Timeout and application shutdown use the same lifecycle boundary. Retrying creates a new attempt; the app does not silently repeat potentially billable requests. On restart, persisted nonterminal attempts from the previous app instance become interrupted, while available results and usage are retained.
+Cancellation terminates and reaps the process, including owned descendants where applicable. Timeout applies independently to each running process, excluding queue wait. Application shutdown signals every running process and finalizes queued attempts without launching them. Response time includes queue wait, which is also recorded separately. Retrying creates a new attempt; the app does not silently repeat potentially billable requests. On restart, persisted nonterminal attempts from the previous app instance become interrupted, while available results and usage are retained.
 
 Use existing CLI authentication through the CLI itself. Store app-specific settings in the app database and apply per-run overrides; model selection in this app must not rewrite the user's global CLI preferences. If managed configuration rejects an override, surface that error.
 
@@ -118,6 +120,8 @@ Keep timestamps in UTC and elapsed durations from a monotonic clock. Store data 
 
 Reopening history creates no model attempt. Regeneration preserves previous attempts under the same lookup. Deleting a lookup removes its attempts and adjusts analysis consistently; explain that consequence in the delete action. Orphaned skill snapshots can be removed when no retained attempt references them.
 
+The sidebar trash action deletes the lookup and all its versions from SQLite, including output and measurements. Show it only while hovering over a row whose lookup has no active version. Remove the selected result when its lookup is deleted; retain unrelated history and drafts. There is no soft archive or undo in the initial implementation.
+
 ### Measurement and analysis rules
 
 The primary metrics describe this dictionary app's requests. They are not account-wide usage or counts of internal model HTTP calls.
@@ -158,16 +162,18 @@ Store any usage reported for failed or canceled attempts, but do not fabricate u
 
 ### What to build
 
-Deliver one complete English-to-Chinese path: native input → selected local skill → real CLI execution → Markdown entry and usage footer → SQLite persistence → reopening the saved entry after restarting. Establish a compatible Rust/GPUI Kit toolchain and the external CLI contract as part of this path. Start with one visible model/effort pair resolved during setup.
+Deliver one complete English-to-Chinese path: native input → selected local skill → real CLI execution → Markdown entry and usage details → SQLite persistence → reopening the saved entry after restarting. Establish a compatible Rust/GPUI Kit toolchain and the external CLI contract as part of this path. Start with one visible model/effort pair resolved during setup.
 
 ### Acceptance criteria
 
-- [ ] A word, phrase, and sentence produce appropriate entries using the selected skill; Chinese text and IPA render correctly.
-- [ ] CLI execution and database work leave the UI responsive. Reopening the saved entry makes no network request.
-- [ ] An attempt is durable before execution and retains a result, terminal state, configuration, tokens when available, and timing.
-- [ ] Fixtures captured for the supported CLI version establish answer-event handling, token semantics, and terminal outcome behavior.
-- [ ] Missing CLI, missing skill, login failure, nonzero exit, incomplete JSONL, and missing usage appear as explicit states.
-- [ ] Parser and lifecycle tests cover split input buffers, unknown events, repeated terminal events, and failure after partial output.
+- [x] A word, phrase, and sentence produce appropriate entries using the selected skill; Chinese text and IPA render correctly.
+- [x] CLI execution and database work leave the UI responsive. Reopening the saved entry makes no network request.
+- [x] An attempt is durable before execution and retains a result, terminal state, configuration, tokens when available, and timing.
+- [x] Fixtures captured for the supported CLI version establish answer-event handling, token semantics, and terminal outcome behavior.
+- [x] Missing CLI, missing skill, login failure, nonzero exit, incomplete JSONL, and missing usage appear as explicit states.
+- [x] Parser and lifecycle tests cover split input buffers, unknown events, repeated terminal events, and failure after partial output.
+
+Validation evidence and current limits: [Phase 1 validation](../docs/phase-1-validation.md).
 
 ## Phase 2: Bidirectional lookup and settings
 
@@ -197,10 +203,10 @@ Deliver searchable, paginated history and attempt details with retry, regenerati
 ### Acceptance criteria
 
 - [ ] English and Chinese substring search find saved inputs; opening an entry performs no inference.
-- [ ] Retry and regeneration create separately measured attempts and preserve previous output.
+- [x] Retry and regeneration create separately measured attempts and preserve previous output (available through Regenerate on saved attempts).
 - [ ] Cancellation and timeout stop owned work and finalize the appropriate status without duplicate records.
 - [ ] Closing or crashing during a request leaves a recoverable interrupted attempt on restart.
-- [ ] Deletion removes the intended lookup and associated attempts; history and analysis query results agree afterward.
+- [x] Deletion removes the intended lookup and associated attempts; history and analysis query results agree afterward (verified with persisted request/token aggregates).
 - [ ] Integration tests use a controllable fake CLI to exercise slow output, cancellation, process failure, and application restart without external model calls.
 
 ## Phase 4: Analysis page
