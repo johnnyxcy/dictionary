@@ -185,12 +185,14 @@ Add automatic/explicit direction selection, the Chinese-to-English instruction l
 
 ### Acceptance criteria
 
-- [ ] Chinese word, phrase, and sentence inputs produce English equivalents with Chinese explanations and useful bilingual examples.
-- [ ] Ambiguous mixed input can be assigned an explicit direction; original text is preserved.
-- [ ] Available models and supported effort choices populate Settings. Med maps to `medium`; Max never silently becomes `xhigh`.
-- [ ] Settings survive restart, while changing them during a request does not alter that request or older records.
-- [ ] Changing skill contents creates a new snapshot; older entries retain their original provenance.
-- [ ] Contract tests cover effort validation and prompt composition. Human review checks representative bilingual output rather than exact generated prose.
+- [x] Chinese word, phrase, and sentence inputs produce English equivalents with Chinese explanations and useful bilingual examples.
+- [x] Ambiguous mixed input can be assigned an explicit direction; original text is preserved.
+- [x] Available models and supported effort choices populate Settings. Med maps to `medium`; Max never silently becomes `xhigh`.
+- [x] Settings survive restart, while changing them during a request does not alter that request or older records.
+- [x] Changing skill contents creates a new snapshot; older entries retain their original provenance.
+- [x] Contract tests cover effort validation and prompt composition. Representative bilingual outputs are reviewed for meaning and usefulness rather than exact generated prose.
+
+Validation evidence and current limits: [Phase 2 validation](../docs/phase-2-validation.md).
 
 ## Phase 3: Reliable history
 

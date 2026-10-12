@@ -11,6 +11,7 @@ fn main() -> anyhow::Result<()> {
         cx.bind_keys([
             KeyBinding::new("cmd-l", ui::FocusLookup, None),
             KeyBinding::new("cmd-b", ui::ToggleSidebar, None),
+            KeyBinding::new("cmd-,", ui::OpenSettings, None),
             KeyBinding::new("cmd-q", ui::Quit, None),
         ]);
         cx.on_action(|_: &ui::Quit, cx| cx.quit());

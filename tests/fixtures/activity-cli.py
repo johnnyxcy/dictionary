@@ -26,9 +26,12 @@ elif "app-server" in sys.argv:
         if method == "config/read":
             result = {"config": {"model": "fixture-model"}}
         elif method == "model/list":
-            result = {"data": [{"id": "fixture-model", "model": "fixture-model", "isDefault": True,
-                               "supportedReasoningEfforts": [{"reasoningEffort": "low"}],
-                               "defaultReasoningEffort": "low"}], "nextCursor": None}
+            result = {"data": [{"id": "fixture-model", "model": "fixture-model", "displayName": "Fixture model", "isDefault": True,
+                               "supportedReasoningEfforts": [{"reasoningEffort": e} for e in ["low", "medium", "high", "max"]],
+                               "defaultReasoningEffort": "low", "serviceTiers": [{"id": "priority", "name": "Fast"}]},
+                              {"id": "fixture-high", "model": "fixture-high", "displayName": "Fixture high only",
+                               "supportedReasoningEfforts": [{"reasoningEffort": "high"}, {"reasoningEffort": "xhigh"}],
+                               "defaultReasoningEffort": "high"}], "nextCursor": None}
         elif method == "skills/list":
             result = {"data": [{"skills": [{"name": "dict", "enabled": True,
                        "path": str(Path(__file__).with_name("activity-skill.md"))}]}]}

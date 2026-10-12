@@ -1,16 +1,23 @@
+mod settings;
+use settings::{PickerItem, SettingsEvent, SettingsView};
+
 use dictionary::{
-    model::{Activity, Attempt, AttemptStatus, Setup},
+    direction::DirectionChoice,
+    model::{Activity, Attempt, AttemptStatus, ServiceTier, Setup},
     service::{Command, Event, Service},
+    settings::SettingsState,
     view_state::LookupState,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
     component::{
-        ActiveTheme, Disableable, Icon, Sizable,
+        ActiveTheme, Disableable, Icon, Sizable, WindowExt,
         button::{Button, ButtonVariants},
         input::{Textarea, TextareaState},
+        notification::{Notification, NotificationList},
         popover::Popover,
+        select::{Select, SelectEvent, SelectState},
         skeleton::Skeleton,
         spinner::Spinner,
         text::TextView,
@@ -18,10 +25,19 @@ use gpui_kit::{
     *,
 };
 
-actions!(dictionary, [FocusLookup, ToggleSidebar, Quit]);
+actions!(dictionary, [FocusLookup, ToggleSidebar, OpenSettings, Quit]);
+
+struct SettingsNotification;
 
 pub struct DictionaryView {
     input: Entity<TextareaState>,
+    direction: DirectionChoice,
+    direction_picker: Entity<SelectState<Vec<PickerItem<DirectionChoice>>>>,
+    settings_state: SettingsState,
+    settings_view: Option<Entity<SettingsView>>,
+    settings_subscription: Option<Subscription>,
+    notifications: Entity<NotificationList>,
+    _direction_subscription: Subscription,
     service: Option<Service>,
     setup: Option<Setup>,
     connecting: bool,
@@ -50,14 +66,39 @@ impl DictionaryView {
                 .submit_on_enter(true)
                 .placeholder("Look up a word, phrase, or sentence…")
         });
-        let subscription = cx.subscribe_in(&input, window, |_: &mut Self, _, _, _, cx| cx.notify());
-        let task = cx.spawn(async move |view, cx| {
+        let direction_picker = cx.new(|cx| {
+            SelectState::new(
+                direction_items(""),
+                Some(gpui_kit::component::IndexPath::new(0)),
+                window,
+                cx,
+            )
+        });
+        let direction_subscription = cx.subscribe_in(
+            &direction_picker,
+            window,
+            |this: &mut Self, _, event, _, cx| {
+                if let SelectEvent::Confirm(Some(direction)) = event {
+                    this.direction = *direction;
+                    this.notice = None;
+                    cx.notify();
+                }
+            },
+        );
+        let subscription = cx.subscribe_in(&input, window, |this: &mut Self, _, _, window, cx| {
+            this.sync_direction(window, cx);
+            cx.notify();
+        });
+        let task = cx.spawn_in(window, async move |view, cx| {
             while let Ok(event) = events.recv().await {
-                if view
-                    .update(cx, |view, cx| {
-                        view.receive(event);
-                        cx.notify();
+                if cx
+                    .update(|window, cx| {
+                        view.update(cx, |view, cx| {
+                            view.receive(event, window, cx);
+                            cx.notify();
+                        })
                     })
+                    .and_then(|result| result)
                     .is_err()
                 {
                     break;
@@ -71,6 +112,13 @@ impl DictionaryView {
         });
         Self {
             input,
+            direction: DirectionChoice::Auto,
+            direction_picker,
+            settings_state: SettingsState::default(),
+            settings_view: None,
+            settings_subscription: None,
+            notifications: cx.new(|cx| NotificationList::new(window, cx)),
+            _direction_subscription: direction_subscription,
             service: Some(service),
             setup: None,
             connecting: true,
@@ -103,7 +151,11 @@ impl DictionaryView {
         }
         self.notice = None;
         let request_id = self.lookups.begin_navigation();
-        self.send(Command::Lookup { request_id, input });
+        self.send(Command::Lookup {
+            request_id,
+            input,
+            direction: self.direction,
+        });
         cx.notify();
     }
 
@@ -119,6 +171,8 @@ impl DictionaryView {
         }
         let attempt_id = attempt.id.clone();
         let input = attempt.input.clone();
+        self.direction = attempt.requested_direction;
+        self.sync_direction(window, cx);
         self.input
             .update(cx, |state, cx| state.set_value(input, window, cx));
         self.notice = None;
@@ -140,7 +194,7 @@ impl DictionaryView {
         cx.notify();
     }
 
-    fn receive(&mut self, event: Event) {
+    fn receive(&mut self, event: Event, window: &mut Window, cx: &mut Context<Self>) {
         let selected_progress = matches!(&event, Event::Progress(progress)
             if self.lookups.selected.as_ref().is_some_and(|a| a.id == progress.attempt_id));
         let navigation = matches!(&event, Event::Opened { request_id, .. }
@@ -162,8 +216,45 @@ impl DictionaryView {
         match event {
             Event::Connecting => {
                 self.connecting = true;
-                self.setup = None;
                 self.setup_error = None;
+                if let Some(view) = &self.settings_view {
+                    view.update(cx, |view, cx| view.set_refreshing(cx));
+                }
+            }
+            Event::Settings(state) => {
+                self.settings_state = *state;
+                if let Some(view) = &self.settings_view {
+                    view.update(cx, |view, cx| {
+                        view.update_state(self.settings_state.clone(), window, cx)
+                    });
+                }
+            }
+            Event::SettingsSaved => {
+                if let Some(view) = &self.settings_view {
+                    view.update(cx, |view, cx| view.finish_save(cx));
+                }
+                self.push_notification(
+                    Notification::success("New lookups will use these settings.")
+                        .title("Settings saved")
+                        .id::<SettingsNotification>()
+                        .placement(Anchor::BottomRight),
+                    window,
+                    cx,
+                );
+            }
+            Event::SettingsFailed(error) => {
+                if let Some(view) = &self.settings_view {
+                    view.update(cx, |view, cx| view.finish_save(cx));
+                }
+                self.push_notification(
+                    Notification::error(error)
+                        .title("Could not save settings")
+                        .id::<SettingsNotification>()
+                        .placement(Anchor::BottomRight)
+                        .autohide(false),
+                    window,
+                    cx,
+                );
             }
             Event::Ready(setup) => {
                 self.setup = Some(setup);
@@ -171,6 +262,7 @@ impl DictionaryView {
                 self.setup_error = None;
             }
             Event::SetupFailed(message) => {
+                self.setup = None;
                 self.connecting = false;
                 self.setup_error = Some(message);
             }
@@ -239,7 +331,14 @@ impl DictionaryView {
     fn configuration(&self) -> String {
         self.setup
             .as_ref()
-            .map(|setup| format!("{} · {}", setup.model, setup.effort))
+            .map(|setup| {
+                let fast = if setup.service_tier == Some(ServiceTier::Fast) {
+                    " · fast"
+                } else {
+                    ""
+                };
+                format!("{} · {}{fast}", setup.model, setup.effort)
+            })
             .unwrap_or_else(|| {
                 if self.connecting {
                     "Connecting…".into()
@@ -249,14 +348,105 @@ impl DictionaryView {
             })
     }
 
-    fn reconnect_button(&self, cx: &Context<Self>) -> Button {
-        icon_button("reconnect", IconName::RefreshCw, "Reconnect")
-            .tooltip(format!("{} · Reconnect", self.configuration()))
-            .disabled(self.connecting || self.lookups.has_active())
-            .on_click(cx.listener(|this, _, _, cx| {
-                this.send(Command::Reconnect);
-                cx.notify();
-            }))
+    fn settings_button(&self, cx: &Context<Self>) -> Button {
+        icon_button("settings", IconName::Settings, "Settings (⌘,)")
+            .on_click(cx.listener(|this, _, window, cx| this.open_settings(window, cx)))
+    }
+
+    fn sync_direction(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let items = direction_items(&self.input.read(cx).value());
+        self.direction_picker.update(cx, |state, cx| {
+            state.set_items(items, window, cx);
+            state.set_selected_value(&self.direction, window, cx);
+        });
+    }
+
+    fn open_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
+        let view = cx
+            .new(|cx| SettingsView::new(self.settings_state.clone(), self.connecting, window, cx));
+        self.settings_subscription = Some(cx.subscribe_in(
+            &view,
+            window,
+            |this, view, event, window, cx| {
+                let command = match event {
+                    SettingsEvent::Save(preferences) => Command::SaveSettings(preferences.clone()),
+                    SettingsEvent::Refresh => Command::Reconnect,
+                };
+                let result = this
+                    .service
+                    .as_ref()
+                    .ok_or_else(|| "Background worker unavailable".to_owned())
+                    .and_then(|s| s.send(command).map_err(|e| e.to_string()));
+                if let Err(error) = result {
+                    let title = match event {
+                        SettingsEvent::Save(_) => {
+                            view.update(cx, |view, cx| view.finish_save(cx));
+                            "Could not save settings"
+                        }
+                        SettingsEvent::Refresh => {
+                            view.update(cx, |view, cx| view.refresh_failed(cx));
+                            "Could not refresh settings"
+                        }
+                    };
+                    this.push_notification(
+                        Notification::error(error)
+                            .title(title)
+                            .id::<SettingsNotification>()
+                            .placement(Anchor::BottomRight)
+                            .autohide(false),
+                        window,
+                        cx,
+                    );
+                }
+            },
+        ));
+        self.settings_view = Some(view.clone());
+        window.open_dialog(cx, move |dialog, _, _| {
+            let cancel_view = view.clone();
+            let save_view = view.clone();
+            dialog
+                .title("Settings")
+                .w(px(560.))
+                .overlay_closable(false)
+                .on_cancel(move |_, window, cx| {
+                    cancel_view.update(cx, |view, cx| view.request_cancel(window, cx))
+                })
+                .on_ok(move |_, _, cx| {
+                    save_view.update(cx, |view, cx| view.save(cx));
+                    false
+                })
+                .child(view.clone())
+        });
+    }
+
+    fn push_notification(
+        &self,
+        notification: Notification,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.notifications.update(cx, |list, cx| {
+            list.push(notification, window, cx);
+        });
+    }
+
+    fn notification_layer(&self, window: &Window) -> impl IntoElement {
+        // GPUI Kit 0.7 dialogs paint at deferred priority 10 + layer, and
+        // menus at POPUP_PRIORITY. Keep toasts above both, below tooltips.
+        // Mount the list once; using WindowExt's default host would leave it
+        // behind deferred dialogs, regardless of normal child ordering.
+        deferred(
+            anchored().position(point(px(0.), px(0.))).child(
+                div()
+                    .w(window.viewport_size().width)
+                    .h(window.viewport_size().height)
+                    .child(self.notifications.clone()),
+            ),
+        )
+        .with_priority(gpui_kit::base::POPUP_PRIORITY + 1)
     }
 
     fn sidebar(&self, cx: &Context<Self>) -> AnyElement {
@@ -500,7 +690,7 @@ impl DictionaryView {
                             .truncate()
                             .child(self.configuration()),
                     )
-                    .child(self.reconnect_button(cx)),
+                    .child(self.settings_button(cx)),
             )
             .into_any_element()
     }
@@ -536,24 +726,19 @@ impl DictionaryView {
                 this.child(self.new_lookup_button(cx))
             })
             .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap_1()
-                    .h(px(32.))
-                    .px_1()
-                    .flex_shrink_0()
-                    .text_xs()
-                    .text_color(theme.muted_foreground)
-                    .child(Icon::new(IconName::Languages).small())
-                    .child("EN → 中文"),
+                div().w(px(168.)).h(px(28.)).flex_shrink_0().child(
+                    Select::new(&self.direction_picker)
+                        .small()
+                        .w_full()
+                        .accessibility_label("Translation direction"),
+                ),
             )
             .child(
                 div().flex_1().min_w_0().child(
                     Textarea::new(&self.input)
                         .small()
                         .w_full()
-                        .aria_label("English word, phrase, or sentence")
+                        .aria_label("English or Chinese word, phrase, or sentence")
                         .accessibility_id("lookup-input"),
                 ),
             )
@@ -568,7 +753,7 @@ impl DictionaryView {
                     .on_click(cx.listener(|this, _, _, cx| this.submit(cx))),
             )
             .when(!self.sidebar_visible, |this| {
-                this.child(self.reconnect_button(cx))
+                this.child(self.settings_button(cx))
             })
             .into_any_element()
     }
@@ -590,9 +775,24 @@ impl DictionaryView {
             ("Reasoning", number(attempt.usage.reasoning_output_tokens)),
             ("Response time", duration(attempt.duration_ms)),
             ("Queue wait", duration(attempt.queue_duration_ms)),
+            ("Direction", attempt.direction.label().into()),
             ("Model", attempt.setup.model.clone()),
             ("Effort", attempt.setup.effort.clone()),
+            (
+                "Service tier",
+                attempt
+                    .setup
+                    .service_tier
+                    .as_ref()
+                    .map_or("Not recorded", |tier| tier.label())
+                    .into(),
+            ),
             ("Skill", attempt.setup.skill_name.clone()),
+            (
+                "Skill version",
+                attempt.skill_hash.chars().take(12).collect(),
+            ),
+            ("Prompt", attempt.prompt_version.clone()),
             ("Created", short_date(&attempt.created_at)),
         ];
         Popover::new(SharedString::from(format!("details-{}", attempt.id)))
@@ -973,7 +1173,7 @@ impl DictionaryView {
                 div()
                     .text_sm()
                     .text_color(theme.muted_foreground)
-                    .child("Meanings, pronunciation, and examples in Chinese."),
+                    .child("English ↔ Chinese · Meanings, pronunciation, and examples."),
             )
             .child(
                 div()
@@ -987,7 +1187,7 @@ impl DictionaryView {
 }
 
 impl Render for DictionaryView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.theme();
         div()
             .flex()
@@ -1012,6 +1212,9 @@ impl Render for DictionaryView {
             .on_action(cx.listener(|this, _: &FocusLookup, window, cx| {
                 this.input.update(cx, |input, cx| input.focus(window, cx));
             }))
+            .on_action(
+                cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
                 this.sidebar_visible = !this.sidebar_visible;
                 cx.notify();
@@ -1041,6 +1244,7 @@ impl Render for DictionaryView {
                     })
                     .child(self.response(cx)),
             )
+            .child(self.notification_layer(window))
     }
 }
 
@@ -1089,4 +1293,22 @@ fn short_date(value: &str) -> String {
                 .to_string()
         })
         .unwrap_or_else(|_| value.into())
+}
+
+fn direction_items(input: &str) -> Vec<PickerItem<DirectionChoice>> {
+    DirectionChoice::ALL
+        .into_iter()
+        .map(|value| PickerItem {
+            value,
+            label: if value == DirectionChoice::Auto && !input.trim().is_empty() {
+                value
+                    .resolve(input)
+                    .map(|d| format!("Auto · {}", d.label()))
+                    .unwrap_or_else(|_| "Auto · choose".into())
+                    .into()
+            } else {
+                value.label().into()
+            },
+        })
+        .collect()
 }
