@@ -82,6 +82,8 @@ The setup script installs `rustfmt` and `clippy` for the pinned toolchain in `ru
 
 Run the same checks manually with `./.githooks/pre-commit`.
 
+The [PR checks workflow](.github/workflows/pr.yml) runs on pull requests and pushes to `main`, with a manual run option. Its macOS job uses the pinned Rust toolchain to run the same formatting/lint checks, the test suite without model requests, and a native application build. It caches Cargo dependencies and build outputs and cancels older runs when a PR is updated.
+
 The UI is a thin GPUI layer over a UI-independent library:
 
 | Module | Responsibility |
