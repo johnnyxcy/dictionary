@@ -1,0 +1,63 @@
+name: PR checks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  RUST_BACKTRACE: "1"
+
+jobs:
+  macos:
+    name: macOS checks
+    runs-on: macos-15
+    timeout-minutes: 30
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.4.app/Contents/Developer
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install pinned Rust toolchain
+        # rustup reads the version and required components from rust-toolchain.toml.
+        run: rustup show
+
+      - name: Check native build tools
+        run: |
+          xcodebuild -version
+          xcrun --sdk macosx --find metal
+          python3 --version
+
+      - name: Cache Rust dependencies and build outputs
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('rust-toolchain.toml', '.github/workflows/pr.yml') }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ runner.arch }}-cargo-${{ hashFiles('rust-toolchain.toml', '.github/workflows/pr.yml') }}-
+
+      - name: Check formatting and lint all targets
+        run: ./.githooks/pre-commit
+
+      - name: Run tests without model requests
+        run: cargo test --locked --no-default-features
+
+      - name: Build native macOS application
+        run: cargo build --locked
