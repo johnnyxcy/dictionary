@@ -13,8 +13,9 @@ use tokio::{
 };
 
 use crate::{
-    model::{Setup, SkillSnapshot},
+    model::{Setup, SkillSnapshot, now},
     runner::ProcessGroup,
+    settings::{Catalog, ModelOption, SkillSource},
 };
 
 #[derive(Clone, Debug)]
@@ -93,7 +94,7 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-pub async fn discover(workspace: PathBuf) -> Result<Setup> {
+pub async fn discover_catalog(workspace: PathBuf) -> Result<Catalog> {
     tokio::time::timeout(Duration::from_secs(45), discover_inner(workspace))
         .await
         .context(
@@ -101,7 +102,7 @@ pub async fn discover(workspace: PathBuf) -> Result<Setup> {
         )?
 }
 
-async fn discover_inner(workspace: PathBuf) -> Result<Setup> {
+async fn discover_inner(workspace: PathBuf) -> Result<Catalog> {
     let executable = find_executable()?;
     let version = Command::new(&executable)
         .arg("--version")
@@ -147,20 +148,19 @@ async fn discover_inner(workspace: PathBuf) -> Result<Setup> {
             if cursor.is_null() { break; }
         }
         ensure!(cursor.is_null(), "Model catalog pagination did not complete");
-        let selected = select_model(&models, configured_model.as_deref())?;
-        let model = selected["model"].as_str().or_else(|| selected["id"].as_str()).context("Model has no identifier")?.to_owned();
-        let efforts = selected["supportedReasoningEfforts"].as_array().context("The selected model does not advertise reasoning efforts")?;
-        let effort = if efforts.iter().any(|e| e["reasoningEffort"] == "low") { "low" } else {
-            selected["defaultReasoningEffort"].as_str().context("No supported default reasoning effort")?
-        }.to_owned();
-        ensure!(efforts.iter().any(|e| e["reasoningEffort"] == effort), "The model's default reasoning effort is not supported");
-        let skills = rpc.call("skills/list", json!({"cwds":[workspace],"forceReload":true})).await?;
-        let (skill_path, skill_name) = if let Some(path) = std::env::var_os("DICTIONARY_SKILL_PATH") {
-            (PathBuf::from(path), "dict".to_owned())
-        } else { select_skill(&skills)? };
-        let setup = Setup { executable, cli_version, model, effort, skill_path, skill_name };
-        SkillSnapshot::read(&setup).context("Cannot read the selected dictionary skill")?;
-        Ok(setup)
+        let models = parse_models(&models)?;
+        let sources = if let Some(path) = std::env::var_os("DICTIONARY_SKILL_PATH") {
+            skill_source(PathBuf::from(path), "dict".into()).map(|source| vec![source])
+        } else {
+            rpc.call("skills/list", json!({"cwds":[workspace],"forceReload":true})).await.and_then(|response| skill_sources(&response))
+        };
+        // Keep model selection and the file-picker fallback available even if
+        // automatic skill discovery fails (for example after a plugin update).
+        let (skills, skill_diagnostic) = match sources {
+            Ok(skills) => (skills, None),
+            Err(error) => (Vec::new(), Some(format!("Dictionary skill discovery failed: {error:#}. Choose SKILL.md with Browse."))),
+        };
+        Ok(Catalog { executable, cli_version, retrieved_at: now(), configured_model, models, skills, skill_diagnostic })
     }.await;
     group.terminate();
     let _ = child.kill().await;
@@ -168,26 +168,76 @@ async fn discover_inner(workspace: PathBuf) -> Result<Setup> {
     result
 }
 
-pub fn select_model<'a>(models: &'a [Value], configured: Option<&str>) -> Result<&'a Value> {
-    if let Some(name) = configured {
-        if let Some(model) = models
-            .iter()
-            .find(|m| m["model"] == name || m["id"] == name)
+pub fn parse_models(values: &[Value]) -> Result<Vec<ModelOption>> {
+    let mut models = Vec::new();
+    for value in values {
+        if value["hidden"] == true
+            || value["inputModalities"]
+                .as_array()
+                .is_some_and(|modes| !modes.iter().any(|mode| mode == "text"))
         {
-            return Ok(model);
+            continue;
         }
-        bail!(
-            "Configured model '{name}' is not in the available catalog. Choose an available model in Codex, or set DICTIONARY_MODEL, then reconnect."
-        );
+        let model = value["model"]
+            .as_str()
+            .or_else(|| value["id"].as_str())
+            .context("Model has no identifier")?;
+        models.push(ModelOption {
+            id: value["id"].as_str().unwrap_or(model).into(),
+            model: model.into(),
+            display_name: value["displayName"].as_str().unwrap_or(model).into(),
+            efforts: value["supportedReasoningEfforts"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|effort| effort["reasoningEffort"].as_str().map(str::to_owned))
+                .collect(),
+            default_effort: value["defaultReasoningEffort"]
+                .as_str()
+                .unwrap_or_default()
+                .into(),
+            is_default: value["isDefault"] == true,
+            supports_fast: value["serviceTiers"].as_array().map_or_else(
+                || {
+                    value["additionalSpeedTiers"]
+                        .as_array()
+                        .is_some_and(|tiers| tiers.iter().any(|tier| tier == "fast"))
+                },
+                |tiers| {
+                    tiers
+                        .iter()
+                        .any(|tier| matches!(tier["id"].as_str(), Some("priority" | "fast")))
+                },
+            ),
+        });
     }
-    models
-        .iter()
-        .find(|m| m["isDefault"] == true)
-        .or_else(|| models.first())
-        .context("No models are available. Run `codex login` in Terminal, then reconnect.")
+    ensure!(
+        !models.is_empty(),
+        "No text models are available. Run `codex login` in Terminal, then refresh Settings."
+    );
+    Ok(models)
 }
 
-fn select_skill(response: &Value) -> Result<(PathBuf, String)> {
+fn skill_source(path: PathBuf, name: String) -> Result<SkillSource> {
+    let setup = Setup {
+        executable: PathBuf::new(),
+        cli_version: String::new(),
+        model: String::new(),
+        effort: String::new(),
+        service_tier: None,
+        skill_path: path.clone(),
+        skill_name: name.clone(),
+    };
+    let snapshot = SkillSnapshot::read(&setup)
+        .with_context(|| format!("Cannot read dictionary skill at {}", path.display()))?;
+    Ok(SkillSource {
+        path,
+        name,
+        hash: snapshot.hash,
+    })
+}
+
+pub fn skill_sources(response: &Value) -> Result<Vec<SkillSource>> {
     let mut candidates = Vec::new();
     for entry in response["data"].as_array().into_iter().flatten() {
         for skill in entry["skills"].as_array().into_iter().flatten() {
@@ -210,29 +260,15 @@ fn select_skill(response: &Value) -> Result<(PathBuf, String)> {
         }
     }
     candidates.sort();
-    let rank = candidates.first().context("No local dictionary skill was found. Install your dict skill or set DICTIONARY_SKILL_PATH to its SKILL.md file, then reconnect.")?.0;
+    let Some(rank) = candidates.first().map(|c| c.0) else {
+        return Ok(Vec::new());
+    };
     let mut unique = BTreeMap::new();
     for (_, name, path) in candidates.into_iter().filter(|c| c.0 == rank) {
-        let setup = Setup {
-            executable: PathBuf::new(),
-            cli_version: String::new(),
-            model: String::new(),
-            effort: String::new(),
-            skill_path: path.clone(),
-            skill_name: name.clone(),
-        };
-        let snapshot = SkillSnapshot::read(&setup)
-            .with_context(|| format!("Cannot read dictionary skill at {}", path.display()))?;
-        unique.entry(snapshot.hash).or_insert((path, name));
+        let source = skill_source(path, name)?;
+        unique.entry(source.hash.clone()).or_insert(source);
     }
-    ensure!(
-        unique.len() == 1,
-        "Different copies of the dict skill are installed. Set DICTIONARY_SKILL_PATH to the copy you want, then reconnect."
-    );
-    unique
-        .into_values()
-        .next()
-        .context("No readable dictionary skill was found")
+    Ok(unique.into_values().collect())
 }
 
 struct Rpc {

@@ -13,12 +13,14 @@ use tokio::{
 };
 
 use crate::{
+    direction::{Direction, DirectionChoice},
     discovery::{self, AppPaths},
     model::{
         Attempt, AttemptStatus, Failure, HistoryEntry, Setup, SkillSnapshot, compose_prompt,
         lookup_key, now, validate_input,
     },
     runner::{self, Progress},
+    settings::{Catalog, Preferences, SettingsState},
     store::Store,
 };
 
@@ -29,6 +31,7 @@ pub enum Command {
     Lookup {
         request_id: RequestId,
         input: String,
+        direction: DirectionChoice,
     },
     Regenerate {
         request_id: RequestId,
@@ -41,6 +44,7 @@ pub enum Command {
     DeleteLookup(String),
     Cancel(String),
     Reconnect,
+    SaveSettings(Preferences),
 }
 
 #[derive(Clone, Debug)]
@@ -48,6 +52,9 @@ pub enum Event {
     History(Vec<HistoryEntry>),
     Connecting,
     Ready(Setup),
+    Settings(Box<SettingsState>),
+    SettingsSaved,
+    SettingsFailed(String),
     SetupFailed(String),
     Opened {
         request_id: RequestId,
@@ -84,7 +91,7 @@ impl Service {
         Self::start_inner(paths, None)
     }
 
-    fn start_inner(paths: AppPaths, setup: Option<Setup>) -> Result<(Self, Receiver<Event>)> {
+    fn start_inner(paths: AppPaths, catalog: Option<Catalog>) -> Result<(Self, Receiver<Event>)> {
         let (commands, receiver) = async_channel::bounded(16);
         let (events, output) = async_channel::bounded(64);
         let (shutdown, stopping) = watch::channel(false);
@@ -104,7 +111,7 @@ impl Service {
                 };
                 runtime.block_on(async move {
                     if let Err(error) =
-                        work(paths, receiver, worker_events.clone(), stopping, setup).await
+                        work(paths, receiver, worker_events.clone(), stopping, catalog).await
                     {
                         let _ = worker_events.send(Event::Fatal(format!("{error:#}"))).await;
                     }
@@ -148,7 +155,7 @@ struct Job {
 }
 
 enum LookupRequest {
-    Search(String),
+    Search(String, DirectionChoice),
     Regenerate(String),
 }
 
@@ -158,7 +165,7 @@ struct Coordinator {
     store: Store,
     workspace: PathBuf,
     jobs: HashMap<String, Job>,
-    keys: HashMap<String, String>,
+    keys: HashMap<(Direction, String), String>,
     queue: VecDeque<String>,
     tasks: JoinSet<Attempt>,
     task_attempts: HashMap<Id, String>,
@@ -191,22 +198,28 @@ impl Coordinator {
 
     async fn accept(&mut self, setup: Option<&Setup>, request: LookupRequest) -> Result<Attempt> {
         let submitted = Instant::now();
-        let (input, lookup_id) = match request {
-            LookupRequest::Search(input) => {
+        let (input, lookup_id, requested_direction, direction) = match request {
+            LookupRequest::Search(input, requested) => {
                 validate_input(&input)?;
-                (input, None)
+                let direction = requested.resolve(&input)?;
+                (input, None, requested, direction)
             }
             LookupRequest::Regenerate(id) => {
                 let original = self.open(id).await?;
-                (original.input, Some(original.lookup_id))
+                (
+                    original.input,
+                    Some(original.lookup_id),
+                    original.requested_direction,
+                    original.direction,
+                )
             }
         };
-        let key = lookup_key(&input);
+        let key = (direction, lookup_key(&input));
         if let Some(id) = self.keys.get(&key) {
             return self.open(id.clone()).await;
         }
         if lookup_id.is_none()
-            && let Some(cached) = self.store.cached(input.clone()).await?
+            && let Some(cached) = self.store.cached(input.clone(), direction).await?
         {
             return Ok(cached);
         }
@@ -214,8 +227,11 @@ impl Coordinator {
             .context("Connect before starting a new lookup")?
             .clone();
         let skill = SkillSnapshot::read(&setup)?;
-        let prompt = compose_prompt(&input, &skill)?;
+        let prompt = compose_prompt(&input, &skill, direction)?;
         let mut attempt = Attempt::new(input, setup, skill.hash.clone());
+        attempt.direction = direction;
+        attempt.requested_direction = requested_direction;
+        attempt.prompt_version = direction.prompt_version().into();
         if let Some(id) = lookup_id {
             attempt.lookup_id = id;
         }
@@ -349,7 +365,8 @@ impl Coordinator {
         let Some(job) = self.jobs.remove(&attempt.id) else {
             return;
         };
-        self.keys.remove(&lookup_key(&attempt.input));
+        self.keys
+            .remove(&(attempt.direction, lookup_key(&attempt.input)));
         self.queue.retain(|id| id != &attempt.id);
         let save_error = match self.store.finalize(attempt.clone(), job.submitted).await {
             Ok(saved) => {
@@ -421,17 +438,33 @@ async fn work(
     commands: Receiver<Command>,
     events: Sender<Event>,
     mut stopping: watch::Receiver<bool>,
-    mut setup: Option<Setup>,
+    catalog: Option<Catalog>,
 ) -> Result<()> {
     let store = Store::open(paths.database).await?;
+    let mut settings = SettingsState {
+        preferences: store.preferences().await?,
+        catalog: store.catalog().await?,
+        cached: true,
+        diagnostic: None,
+    };
     let mut coordinator = Coordinator::new(store, paths.workspace.clone());
     coordinator.history(&events).await;
-    let mut discovery_task = if let Some(setup) = &setup {
-        events.send(Event::Ready(setup.clone())).await.ok();
+    let mut discovery_task = if let Some(catalog) = catalog {
+        install_catalog(&mut settings, catalog, &coordinator.store).await?;
         None
     } else {
-        Some(tokio::spawn(discovery::discover(paths.workspace.clone())))
+        Some(tokio::spawn(discovery::discover_catalog(
+            paths.workspace.clone(),
+        )))
     };
+    let mut setup = if settings.catalog.is_some() {
+        publish_settings(&settings, &events).await
+    } else {
+        None
+    };
+    if discovery_task.is_some() {
+        events.send(Event::Connecting).await.ok();
+    }
     let (progress, updates) = async_channel::bounded::<Progress>(96);
     loop {
         if *stopping.borrow() {
@@ -449,8 +482,8 @@ async fn work(
             command = commands.recv() => {
                 let Ok(command) = command else { break; };
                 let (request_id, result) = match command {
-                    Command::Lookup { request_id, input } =>
-                        (request_id, coordinator.accept(setup.as_ref(), LookupRequest::Search(input)).await),
+                    Command::Lookup { request_id, input, direction } =>
+                        (request_id, coordinator.accept(setup.as_ref(), LookupRequest::Search(input, direction)).await),
                     Command::Regenerate { request_id, attempt_id } =>
                         (request_id, coordinator.accept(setup.as_ref(), LookupRequest::Regenerate(attempt_id)).await),
                     Command::Open { request_id, attempt_id } =>
@@ -470,10 +503,30 @@ async fn work(
                         continue;
                     }
                     Command::Reconnect => {
-                        if coordinator.jobs.is_empty() && discovery_task.is_none() {
-                            setup = None;
+                        if discovery_task.is_none() {
                             events.send(Event::Connecting).await.ok();
-                            discovery_task = Some(tokio::spawn(discovery::discover(paths.workspace.clone())));
+                            discovery_task = Some(tokio::spawn(discovery::discover_catalog(paths.workspace.clone())));
+                        }
+                        continue;
+                    }
+                    Command::SaveSettings(preferences) => {
+                        let result = async {
+                            let catalog = settings.catalog.as_ref().context("Refresh the model catalog before saving Settings")?;
+                            let chosen = preferences.setup(catalog)?;
+                            SkillSnapshot::read(&chosen).context("Cannot read the chosen dictionary skill")?;
+                            coordinator.store.save_preferences(preferences.clone()).await?;
+                            Ok::<_, anyhow::Error>(chosen)
+                        }.await;
+                        match result {
+                            Ok(chosen) => {
+                                settings.preferences = Some(preferences);
+                                if !settings.cached { settings.diagnostic = None; }
+                                setup = Some(chosen.clone());
+                                events.send(Event::Ready(chosen)).await.ok();
+                                events.send(Event::Settings(Box::new(settings.clone()))).await.ok();
+                                events.send(Event::SettingsSaved).await.ok();
+                            }
+                            Err(error) => { events.send(Event::SettingsFailed(format!("{error:#}"))).await.ok(); }
                         }
                         continue;
                     }
@@ -488,10 +541,18 @@ async fn work(
             }
             result = async { discovery_task.as_mut().expect("guarded metadata task").await }, if discovery_task.is_some() => {
                 discovery_task = None;
-                match result {
-                    Ok(Ok(value)) => { setup = Some(value.clone()); events.send(Event::Ready(value)).await.ok(); }
-                    Ok(Err(error)) => { events.send(Event::SetupFailed(format!("{error:#}"))).await.ok(); }
-                    Err(error) => { events.send(Event::SetupFailed(format!("Setup worker failed: {error}"))).await.ok(); }
+                let result = match result {
+                    Ok(Ok(catalog)) => install_catalog(&mut settings, catalog, &coordinator.store).await,
+                    Ok(Err(error)) => Err(error),
+                    Err(error) => Err(anyhow!("Setup worker failed: {error}")),
+                };
+                if let Err(error) = result {
+                    settings.cached = true;
+                    settings.diagnostic = Some(format!("{error:#}"));
+                }
+                setup = publish_settings(&settings, &events).await;
+                if settings.catalog.is_none() {
+                    events.send(Event::SetupFailed(settings.diagnostic.clone().unwrap_or_else(|| "Model catalog is unavailable".into()))).await.ok();
                 }
             }
         }
@@ -503,6 +564,48 @@ async fn work(
     events.close();
     coordinator.shutdown(&events).await;
     Ok(())
+}
+
+async fn install_catalog(
+    settings: &mut SettingsState,
+    catalog: Catalog,
+    store: &Store,
+) -> Result<()> {
+    store.save_catalog(catalog.clone()).await?;
+    if settings.preferences.is_none() {
+        let preferences = Preferences::initial(&catalog);
+        store.save_preferences(preferences.clone()).await?;
+        settings.preferences = Some(preferences);
+    }
+    settings.diagnostic = catalog.skill_diagnostic.clone();
+    settings.catalog = Some(catalog);
+    settings.cached = false;
+    Ok(())
+}
+
+async fn publish_settings(settings: &SettingsState, events: &Sender<Event>) -> Option<Setup> {
+    events
+        .send(Event::Settings(Box::new(settings.clone())))
+        .await
+        .ok();
+    let result = settings.setup().and_then(|setup| {
+        SkillSnapshot::read(&setup)
+            .context("Cannot read the dictionary skill. Choose its current location in Settings")?;
+        Ok(setup)
+    });
+    match result {
+        Ok(setup) => {
+            events.send(Event::Ready(setup.clone())).await.ok();
+            Some(setup)
+        }
+        Err(error) => {
+            events
+                .send(Event::SetupFailed(format!("{error:#}")))
+                .await
+                .ok();
+            None
+        }
+    }
 }
 
 #[cfg(test)]

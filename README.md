@@ -2,7 +2,7 @@
 
 A native macOS learning dictionary built with Rust and GPUI Kit. It runs an independent `codex exec` request with your installed dictionary skill for each lookup and keeps entries and measurements in local SQLite history.
 
-Phase 1 implements English → Simplified Chinese words, phrases, and sentences. See the [implementation plan](plans/dictionary-app.md) for reverse lookups, settings, searchable history, and analysis charts in later phases.
+Phases 1–2 implement English ↔ Simplified Chinese lookups, saved entries, and persistent model/effort settings. See the [implementation plan](plans/dictionary-app.md) for searchable history and analysis charts in later phases.
 
 ## Run
 
@@ -17,13 +17,13 @@ Requirements:
 cargo run --locked
 ```
 
-The app reads the available model catalog and your configured CLI model, then selects Low effort when supported. The chosen pair appears at the bottom of the sidebar. It reuses CLI authentication and leaves your global CLI configuration unchanged.
+On first launch, the app selects your configured CLI model when available, otherwise the catalog default, and prefers Low effort when supported. Later launches restore your saved settings. The chosen pair appears at the bottom of the sidebar. It reuses CLI authentication and leaves your global CLI configuration unchanged.
 
 Enter text and press **Enter**, or click **Look up**. **Shift+Enter** inserts a newline, and the compact input expands for multiline text. **Command+Enter** also submits. **Command+L** focuses the input and **Command+B** toggles the history sidebar. The result supports selection, scrolling, and the **Copy** icon copies it as Markdown. Up to **three lookups run concurrently**; additional requests wait in a first-in, first-out queue. **Look up** always submits the current input. **Stop**, beside the selected entry’s running status, cancels only that entry (or removes it from the queue before it starts). New Lookup and switching history entries leave other requests running; their completion never changes your selected view. Select an item in History to read its saved result without generating another entry.
 
-Searching an expression that is already running or queued opens that same attempt. Otherwise, searching an already saved expression opens its latest successful result, including while all slots are busy or the CLI is unavailable. It makes no model request and adds no attempt or token usage. Matching ignores surrounding whitespace and canonical Unicode differences, but preserves case, punctuation, and internal whitespace. Failed or incomplete attempts never replace a successful cached result. Use **Regenerate**, immediately left of Copy, to request a fresh entry for the selected result's original input using the current configuration. Earlier attempts and their measurements remain in history. Repeated clicks on Look up or Regenerate reuse an active attempt for the same expression.
+Searching an expression that is already running or queued in the same translation direction opens that attempt. Otherwise, searching an already saved expression opens its latest successful result, including while all slots are busy or the CLI is unavailable. It makes no model request and adds no attempt or token usage. Matching ignores surrounding whitespace and canonical Unicode differences, but preserves case, punctuation, and internal whitespace. Failed or incomplete attempts never replace a successful cached result. Use **Regenerate**, immediately left of Copy, to request a fresh entry for the selected result's original input and direction using the current configuration. Earlier attempts and their measurements remain in history. Repeated clicks on Look up or Regenerate reuse an active attempt for the same expression and direction.
 
-Each sidebar item shows the original input and Chinese translation preview. Running and failed states appear inline with the preview; successful entries have no status label. Icons stay aligned with the first preview line when text wraps. The translation fills the main pane beneath a slim toolbar; the **Entry details** info icon opens token breakdowns, configuration, and timestamps without taking permanent space from the entry.
+Each sidebar item shows the original input and a translation preview in the target language. Running and failed states appear inline with the preview; successful entries have no status label. Icons stay aligned with the first preview line when text wraps. The translation fills the main pane beneath a slim toolbar; the **Entry details** info icon opens token breakdowns, configuration, and timestamps without taking permanent space from the entry.
 
 Hover a history row to reveal its trash icon, which **deletes that lookup and all its regenerated versions**, including their saved output, token usage, and timings. It removes them from SQLite and cached search. This is permanent; there is no archive or undo. The icon stays hidden while any version of that lookup is running or queued. Unrelated entries and their shared skill snapshots are preserved.
 
@@ -45,7 +45,21 @@ This is a development bundle. Signing, notarization, and distribution are outsid
 
 ## Local configuration and history
 
-Phase 1 has a visible fixed model/effort pair and a **Reconnect** button. A model picker and persisted settings arrive in Phase 2. Optional environment overrides are available now:
+Use **Auto**, **EN → 中文**, or **中文 → EN** beside the input. Auto displays its resolved direction before submission; mixed or ambiguous text requires an explicit choice. Chinese input produces natural English equivalents with Chinese explanations and bilingual examples. Original punctuation, whitespace, and line breaks are preserved.
+
+Open **Settings** with the gear icon or **Command+,**. The model picker uses the CLI's advertised catalog. Low / Med / High / Max controls enable only supported levels; Med sends `medium`, and Max requires literal `max` support. `xhigh` is never substituted. Switching to a model that does not support your selected effort requires an explicit new choice before saving.
+
+**Fast mode** requests the CLI's Fast service tier without changing thinking effort. It is available when the selected model advertises it; the modal notes its higher usage. Turning it off explicitly requests Standard routing, overriding any global CLI tier preference. The mapping follows the [Fast mode documentation](https://learn.chatgpt.com/docs/agent-configuration/speed#fast-mode) and the installed CLI's model catalog.
+
+Settings persist in SQLite and apply to newly admitted requests. Running and queued attempts keep their model, effort, requested service tier, direction, and skill snapshot. Saved searches still open cached entries regardless of current settings; use Regenerate to apply new settings to a saved expression. Entry details show the requested tier; older entries show **Not recorded** because they inherited the CLI preference.
+
+Saving keeps Settings open and shows a success or error toast. Errors retain the draft for correction and remain visible until dismissed or replaced by a later save result.
+
+**Cancel**, the close icon, and Escape ask before discarding unsaved settings, with **Keep editing** and **Discard** choices. Unchanged, reverted, or successfully saved settings close immediately. Closing is blocked while a save is in progress.
+
+Settings also shows the selected skill, offers a native **Browse…** file picker for relocation, and provides **Refresh** plus CLI diagnostics. Byte-identical skill copies collapse into one choice; differing copies require selection. The catalog is cached with its retrieval time and CLI version, refreshed on startup and explicitly in Settings, and labeled **Cached catalog** when refresh fails. Cached entries remain readable offline.
+
+Optional development overrides (model and skill overrides seed the initial preferences; use Settings after the first launch):
 
 | Variable | Purpose |
 | --- | --- |
@@ -54,7 +68,7 @@ Phase 1 has a visible fixed model/effort pair and a **Reconnect** button. A mode
 | `DICTIONARY_SKILL_PATH` | Absolute path to the selected `SKILL.md`; useful if different copies are installed. |
 | `DICTIONARY_DATA_DIR` | Alternate directory for history and the isolated CLI working directory. |
 
-The default database is `~/Library/Application Support/Dictionary/history.sqlite3`. It contains original inputs, Markdown entries, outcomes, immutable request configuration, skill snapshots, reported usage, and timings. The recent list shows the latest 200 attempts; cached searches cover the entire database and reveal older matching entries in the sidebar. Schema version 2 adds an indexed cache key and preserves existing attempts. A file lock prevents competing app instances from using the same history. Pending requests left by a previous process become interrupted on startup.
+The default database is `~/Library/Application Support/Dictionary/history.sqlite3`. It contains original inputs, Markdown entries, outcomes, immutable request configuration, skill snapshots, reported usage, and timings. The recent list shows the latest 200 attempts; cached searches cover the entire database and reveal older matching entries in the sidebar. Schema version 3 adds persistent settings, a cached catalog, and requested direction while retaining the direction-aware cache index. Older entries keep their English → Chinese direction and original saved payloads. A file lock prevents competing app instances from using the same history. Pending requests left by a previous process become interrupted on startup.
 
 The prompt reads the selected skill file for every lookup and records its SHA-256 and exact contents. Byte-identical installed copies are collapsed. The input travels as JSON-encoded text through stdin, never through shell interpolation. Each request has fresh context and uses a dedicated CLI process in a read-only sandbox with `--ephemeral` and `--no-daemon`.
 
@@ -89,6 +103,8 @@ The UI is a thin GPUI layer over a UI-independent library:
 | Module | Responsibility |
 | --- | --- |
 | `discovery` | Executable, model, effort, and local skill discovery using a short-lived metadata session. |
+| `direction` | Automatic script detection and explicit translation direction. |
+| `settings` | Catalog capabilities, persisted preferences, and validated request configuration. |
 | `model` | Request snapshots, input validation, prompt composition, and measurements. |
 | `protocol` | Incremental JSONL decoding and idempotent answer/usage reconciliation. |
 | `runner` | Direct subprocess execution, pipe draining, cancellation, deadlines, and cleanup. |
@@ -104,7 +120,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo build --locked
 ```
 
-Core tests use an observed CLI fixture and controllable local executables; they make no model requests. They cover split UTF-8/JSONL, repeated events, unknown/missing usage, literal input, durable history, failure after output, authentication errors, cancellation, timeouts, concurrent result isolation, queue advancement, active-key deduplication, shutdown, and stale navigation events. See [validation notes](docs/phase-1-validation.md).
+Core tests use an observed CLI fixture and controllable local executables; they make no model requests. They cover split UTF-8/JSONL, repeated events, unknown/missing usage, literal input, durable history, failure after output, authentication errors, cancellation, timeouts, concurrent result isolation, queue advancement, active-key deduplication, shutdown, and stale navigation events. See [Phase 1 validation](docs/phase-1-validation.md) and [Phase 2 validation](docs/phase-2-validation.md).
 
 A headless example exercises the same coordinator and persistence path. It uses a cached result when available; otherwise it makes a real request using your CLI account:
 

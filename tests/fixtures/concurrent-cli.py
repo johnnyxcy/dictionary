@@ -27,12 +27,13 @@ control.mkdir(exist_ok=True)
 started = control / f"started-{os.getpid()}.json"
 # Atomic publication lets the test reader inspect complete JSON immediately.
 temporary = started.with_suffix(".tmp")
-temporary.write_text(json.dumps({"input": text, "pid": os.getpid()}))
+temporary.write_text(json.dumps({"input": text, "pid": os.getpid(), "args": sys.argv[1:], "prompt": prompt}))
 temporary.replace(started)
 emit({"type": "thread.started", "thread_id": f"fixture-{os.getpid()}"})
 emit({"type": "turn.started"})
 item("started", "reasoning", "reasoning", text=f"Checking the meaning of {text} (synthetic fixture).")
-partial = f"# {text}\n\n测试翻译：{text}"
+reverse = "Produce one Chinese-to-English" in prompt
+partial = f"# {text}\n\n" + (f"Natural English equivalent of {text}" if reverse else f"测试翻译：{text}")
 item("started", "answer", "agent_message", phase="final_answer", text=partial)
 release = control / ("release-" + hashlib.sha256(text.encode()).hexdigest())
 deadline = time.monotonic() + 120

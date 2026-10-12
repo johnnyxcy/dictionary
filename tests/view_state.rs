@@ -13,6 +13,7 @@ fn attempt(input: &str) -> Attempt {
             cli_version: "fixture".into(),
             model: "fixture-model".into(),
             effort: "low".into(),
+            service_tier: Some(dictionary::model::ServiceTier::Standard),
             skill_path: "/unused-skill".into(),
             skill_name: "dict".into(),
         },

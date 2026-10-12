@@ -1,5 +1,6 @@
 //! Exercise the same service as the desktop app without loading GPUI.
 use dictionary::{
+    direction::DirectionChoice,
     discovery::AppPaths,
     service::{Command, Event, Service},
 };
@@ -11,6 +12,7 @@ fn main() -> anyhow::Result<()> {
     let paths = AppPaths::discover()?;
     eprintln!("History: {}", paths.database.display());
     let (service, events) = Service::start(paths)?;
+    let mut submitted = false;
     while let Ok(event) = events.recv_blocking() {
         match event {
             Event::Opened { attempt, .. } if !attempt.status.is_active() => {
@@ -21,11 +23,13 @@ fn main() -> anyhow::Result<()> {
                 );
                 break;
             }
-            Event::Ready(setup) => {
+            Event::Ready(setup) if !submitted => {
+                submitted = true;
                 eprintln!("{} · {} · {}", setup.model, setup.effort, setup.skill_name);
                 service.send(Command::Lookup {
                     request_id: 1,
                     input: input.clone(),
+                    direction: DirectionChoice::Auto,
                 })?;
             }
             Event::Finished {

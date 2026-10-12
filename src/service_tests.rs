@@ -19,10 +19,12 @@ impl Harness {
             cli_version: "fixture".into(),
             model: "fixture-model".into(),
             effort: "low".into(),
+            service_tier: Some(crate::model::ServiceTier::Standard),
             skill_path: fixtures.join("activity-skill.md"),
             skill_name: "dict".into(),
         };
-        let (service, events) = Service::start_inner(paths.clone(), Some(setup)).unwrap();
+        let (service, events) =
+            Service::start_inner(paths.clone(), Some(fixture_catalog(setup))).unwrap();
         Self {
             service: Some(service),
             events,
@@ -40,6 +42,7 @@ impl Harness {
         self.send(Command::Lookup {
             request_id,
             input: input.into(),
+            direction: DirectionChoice::Auto,
         });
     }
 
@@ -375,6 +378,7 @@ async fn saved_entry(root: &std::path::Path) -> (Store, Attempt) {
         cli_version: "fixture".into(),
         model: "original-model".into(),
         effort: "low".into(),
+        service_tier: Some(crate::model::ServiceTier::Standard),
         skill_path,
         skill_name: "dict".into(),
     };
@@ -398,7 +402,10 @@ async fn cached_navigation_needs_no_setup_skill_or_new_attempt() {
     std::fs::remove_file(&original.setup.skill_path).unwrap();
     for _ in 0..3 {
         let cached = coordinator
-            .accept(None, LookupRequest::Search(" break the ice \n".into()))
+            .accept(
+                None,
+                LookupRequest::Search(" break the ice \n".into(), DirectionChoice::Auto),
+            )
             .await
             .unwrap();
         assert_eq!(cached.id, original.id);
@@ -407,7 +414,10 @@ async fn cached_navigation_needs_no_setup_skill_or_new_attempt() {
     }
     assert!(
         coordinator
-            .accept(None, LookupRequest::Search("new expression".into()))
+            .accept(
+                None,
+                LookupRequest::Search("new expression".into(), DirectionChoice::Auto)
+            )
             .await
             .is_err()
     );
@@ -442,7 +452,7 @@ async fn deleted_lookup_is_not_reused_by_search_or_regeneration() {
     let attempt = coordinator
         .accept(
             Some(&original.setup),
-            LookupRequest::Search(original.input.clone()),
+            LookupRequest::Search(original.input.clone(), DirectionChoice::Auto),
         )
         .await
         .unwrap();
@@ -484,7 +494,7 @@ async fn regenerate_bypasses_cache_with_fresh_settings_and_original_input() {
     // A pending regeneration never displaces the last successful cached answer.
     assert_eq!(
         store
-            .cached(original.input.clone())
+            .cached(original.input.clone(), original.direction)
             .await
             .unwrap()
             .unwrap()
@@ -492,4 +502,281 @@ async fn regenerate_bypasses_cache_with_fresh_settings_and_original_input() {
         original.id
     );
     assert_eq!(store.get(original.id).await.unwrap().answer, "打破僵局");
+}
+
+fn fixture_catalog(setup: Setup) -> Catalog {
+    Catalog {
+        skill_diagnostic: None,
+        executable: setup.executable,
+        cli_version: setup.cli_version,
+        retrieved_at: now(),
+        configured_model: Some(setup.model.clone()),
+        models: vec![crate::settings::ModelOption {
+            id: setup.model.clone(),
+            model: setup.model,
+            display_name: "Fixture model".into(),
+            efforts: vec!["low".into(), "medium".into(), "high".into(), "max".into()],
+            default_effort: "low".into(),
+            is_default: true,
+            supports_fast: true,
+        }],
+        skills: vec![crate::settings::SkillSource {
+            path: setup.skill_path,
+            name: setup.skill_name,
+            hash: "fixture".into(),
+        }],
+    }
+}
+
+#[tokio::test]
+async fn settings_changes_preserve_running_and_queued_snapshots_and_survive_restart() {
+    let mut h = Harness::new();
+    for (id, input) in [
+        (1, "first"),
+        (2, "second"),
+        (3, "third"),
+        (4, "queued before"),
+    ] {
+        h.lookup(id, input);
+    }
+    let first = h.opened(1).await;
+    let second = h.opened(2).await;
+    let third = h.opened(3).await;
+    let fourth = h.opened(4).await;
+    h.streaming(&first.id).await;
+    assert_eq!(fourth.status, AttemptStatus::Pending);
+    let state = h
+        .seen
+        .iter()
+        .find_map(|event| match event {
+            Event::Settings(state) => Some(*state.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let catalog = state.catalog.unwrap();
+    let mut preferences = state.preferences.unwrap();
+    preferences.effort = "medium".into();
+    preferences.fast_mode = true;
+    h.send(Command::SaveSettings(preferences.clone()));
+    h.until(|events| events.iter().any(|e| matches!(e, Event::SettingsSaved)))
+        .await;
+    h.lookup(5, "queued after");
+    let fifth = h.opened(5).await;
+    assert_eq!(fifth.setup.effort, "medium");
+    assert_eq!(fourth.setup.effort, "low");
+    assert_eq!(
+        fifth.setup.service_tier,
+        Some(crate::model::ServiceTier::Fast)
+    );
+    assert_eq!(
+        fourth.setup.service_tier,
+        Some(crate::model::ServiceTier::Standard)
+    );
+    h.release("first");
+    h.finished(&first.id).await;
+    h.streaming(&fourth.id).await;
+    h.release("second");
+    h.finished(&second.id).await;
+    h.streaming(&fifth.id).await;
+    for (input, effort, tier) in [
+        ("first", "low", "default"),
+        ("queued before", "low", "default"),
+        ("queued after", "medium", "fast"),
+    ] {
+        let started = h
+            .spawned()
+            .into_iter()
+            .find(|s| s["input"] == input)
+            .unwrap();
+        assert!(
+            started["args"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|a| a == &format!("model_reasoning_effort=\"{effort}\""))
+        );
+        let args = started["args"].as_array().unwrap();
+        assert!(
+            args.iter()
+                .any(|arg| arg == &format!("service_tier=\"{tier}\""))
+        );
+        assert_eq!(
+            args.iter().any(|arg| arg == "features.fast_mode=true"),
+            tier == "fast"
+        );
+    }
+    for attempt in [&third, &fourth, &fifth] {
+        h.release(&attempt.input);
+        h.finished(&attempt.id).await;
+    }
+    let old = h.saved();
+    drop(h.service.take());
+    let (service, events) = Service::start_inner(h.paths.clone(), Some(catalog)).unwrap();
+    h.service = Some(service);
+    h.events = events;
+    h.seen.clear();
+    h.until(|events| {
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Ready(setup) if setup.effort == "medium" && setup.service_tier == Some(crate::model::ServiceTier::Fast)))
+    })
+    .await;
+    assert_eq!(
+        serde_json::to_value(h.saved()).unwrap(),
+        serde_json::to_value(old).unwrap()
+    );
+}
+
+#[tokio::test]
+async fn unsupported_settings_are_rejected_without_replacing_saved_preferences() {
+    let mut h = Harness::new();
+    h.until(|events| events.iter().any(|e| matches!(e, Event::Ready(_))))
+        .await;
+    let mut preferences = h
+        .seen
+        .iter()
+        .find_map(|e| match e {
+            Event::Settings(state) => state.preferences.clone(),
+            _ => None,
+        })
+        .unwrap();
+    preferences.effort = "xhigh".into();
+    h.send(Command::SaveSettings(preferences));
+    h.until(|events| events.iter().any(|e| matches!(e, Event::SettingsFailed(_))))
+        .await;
+    h.lookup(1, "still low");
+    let attempt = h.opened(1).await;
+    assert_eq!(attempt.setup.effort, "low");
+    h.release(&attempt.input);
+    h.finished(&attempt.id).await;
+    let db = rusqlite::Connection::open(&h.paths.database).unwrap();
+    let json: String = db
+        .query_row(
+            "SELECT payload FROM app_state WHERE key='preferences'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<Preferences>(&json).unwrap().effort,
+        "low"
+    );
+}
+
+#[tokio::test]
+async fn missing_discovered_skill_can_be_repaired_without_losing_the_model_catalog() {
+    let mut h = Harness::new();
+    h.until(|events| events.iter().any(|e| matches!(e, Event::Ready(_))))
+        .await;
+    let mut catalog = h
+        .seen
+        .iter()
+        .find_map(|e| match e {
+            Event::Settings(state) => state.catalog.clone(),
+            _ => None,
+        })
+        .unwrap();
+    let path = catalog.skills[0].path.clone();
+    catalog.skills.clear();
+    catalog.skill_diagnostic = Some("Skill discovery unavailable; use Browse".into());
+    drop(h.service.take());
+    let mut db = crate::store::Database::open(&h.paths.database).unwrap();
+    db.write_state("preferences", &Preferences::initial(&catalog))
+        .unwrap();
+    drop(db);
+    let (service, events) = Service::start_inner(h.paths.clone(), Some(catalog)).unwrap();
+    h.service = Some(service);
+    h.events = events;
+    h.seen.clear();
+    h.until(|events| events.iter().any(|e| matches!(e, Event::SetupFailed(_))))
+        .await;
+    let state = h
+        .seen
+        .iter()
+        .find_map(|e| match e {
+            Event::Settings(state) => Some(*state.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(!state.catalog.unwrap().models.is_empty());
+    let mut preferences = state.preferences.unwrap();
+    preferences.skill_path = path;
+    h.send(Command::SaveSettings(preferences));
+    h.until(|events| events.iter().any(|e| matches!(e, Event::SettingsSaved)))
+        .await;
+    h.lookup(1, "repaired skill");
+    let attempt = h.opened(1).await;
+    h.release(&attempt.input);
+    assert_eq!(
+        h.finished(&attempt.id).await.status,
+        AttemptStatus::Succeeded
+    );
+}
+
+#[tokio::test]
+async fn active_and_cached_lookups_are_separate_in_each_direction_and_regeneration_preserves_direction()
+ {
+    let mut h = Harness::new();
+    let input = "你好 hello";
+    h.send(Command::Lookup {
+        request_id: 1,
+        input: input.into(),
+        direction: DirectionChoice::EnZh,
+    });
+    h.send(Command::Lookup {
+        request_id: 2,
+        input: input.into(),
+        direction: DirectionChoice::ZhEn,
+    });
+    let forward = h.opened(1).await;
+    let reverse = h.opened(2).await;
+    assert_ne!(forward.id, reverse.id);
+    assert_eq!(reverse.direction, Direction::ZhEn);
+    h.send(Command::Lookup {
+        request_id: 3,
+        input: input.into(),
+        direction: DirectionChoice::ZhEn,
+    });
+    assert_eq!(h.opened(3).await.id, reverse.id);
+    h.streaming(&forward.id).await;
+    h.streaming(&reverse.id).await;
+    h.release(input);
+    h.finished(&forward.id).await;
+    h.finished(&reverse.id).await;
+    h.send(Command::Lookup {
+        request_id: 4,
+        input: input.into(),
+        direction: DirectionChoice::EnZh,
+    });
+    h.send(Command::Lookup {
+        request_id: 5,
+        input: input.into(),
+        direction: DirectionChoice::ZhEn,
+    });
+    assert_eq!(h.opened(4).await.id, forward.id);
+    assert_eq!(h.opened(5).await.id, reverse.id);
+    assert_eq!(h.spawned().len(), 2);
+    h.send(Command::Regenerate {
+        request_id: 6,
+        attempt_id: reverse.id.clone(),
+    });
+    let regenerated = h.opened(6).await;
+    assert_eq!(regenerated.lookup_id, reverse.lookup_id);
+    assert_eq!(regenerated.direction, Direction::ZhEn);
+    assert_eq!(regenerated.input, input);
+    assert_eq!(
+        h.finished(&regenerated.id).await.status,
+        AttemptStatus::Succeeded
+    );
+    let prompts = h.spawned();
+    assert_eq!(
+        prompts
+            .iter()
+            .filter(|p| p["prompt"]
+                .as_str()
+                .unwrap()
+                .starts_with("Produce one Chinese-to-English"))
+            .count(),
+        2
+    );
 }

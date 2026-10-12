@@ -1,6 +1,8 @@
 use std::{
     fs::{File, OpenOptions},
     path::{Path, PathBuf},
+    sync::Arc,
+    thread::JoinHandle,
     time::Instant,
 };
 
@@ -11,20 +13,40 @@ use rusqlite::{Connection, OptionalExtension, params};
 use unicode_normalization::UnicodeNormalization;
 
 use crate::model::{Attempt, AttemptStatus, Failure, HistoryEntry, SkillSnapshot, lookup_key, now};
+use crate::{
+    direction::Direction,
+    settings::{Catalog, Preferences},
+};
 
 type Job = Box<dyn FnOnce(&mut Database) + Send>;
 
 /// One connection and one file lock, both owned by a dedicated database thread.
 #[derive(Clone)]
 pub struct Store {
+    worker: Arc<StorageWorker>,
+}
+
+struct StorageWorker {
     jobs: Sender<Job>,
+    thread: Option<JoinHandle<()>>,
+}
+
+impl Drop for StorageWorker {
+    fn drop(&mut self) {
+        self.jobs.close();
+        // Finish pending writes and release the database lock before a new
+        // service can reopen this profile during restart.
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 impl Store {
     pub async fn open(path: PathBuf) -> Result<Self> {
         let (jobs, receiver) = async_channel::bounded::<Job>(32);
         let (ready, initialized) = tokio::sync::oneshot::channel();
-        std::thread::Builder::new()
+        let thread = std::thread::Builder::new()
             .name("dictionary-storage".into())
             .spawn(move || {
                 let mut database = match Database::open(&path) {
@@ -44,7 +66,12 @@ impl Store {
         initialized
             .await
             .context("Storage worker stopped during initialization")??;
-        Ok(Self { jobs })
+        Ok(Self {
+            worker: Arc::new(StorageWorker {
+                jobs,
+                thread: Some(thread),
+            }),
+        })
     }
 
     async fn call<T: Send + 'static>(
@@ -52,7 +79,8 @@ impl Store {
         f: impl FnOnce(&mut Database) -> Result<T> + Send + 'static,
     ) -> Result<T> {
         let (tx, rx) = tokio::sync::oneshot::channel();
-        self.jobs
+        self.worker
+            .jobs
             .send(Box::new(move |db| {
                 let _ = tx.send(f(db));
             }))
@@ -93,8 +121,26 @@ impl Store {
         self.call(|db| db.history()).await
     }
 
-    pub async fn cached(&self, input: String) -> Result<Option<Attempt>> {
-        self.call(move |db| db.cached(&input)).await
+    pub async fn cached(&self, input: String, direction: Direction) -> Result<Option<Attempt>> {
+        self.call(move |db| db.cached(&input, direction)).await
+    }
+
+    pub async fn preferences(&self) -> Result<Option<Preferences>> {
+        self.call(|db| db.read_state("preferences")).await
+    }
+
+    pub async fn catalog(&self) -> Result<Option<Catalog>> {
+        self.call(|db| db.read_state("catalog")).await
+    }
+
+    pub async fn save_preferences(&self, preferences: Preferences) -> Result<()> {
+        self.call(move |db| db.write_state("preferences", &preferences))
+            .await
+    }
+
+    pub async fn save_catalog(&self, catalog: Catalog) -> Result<()> {
+        self.call(move |db| db.write_state("catalog", &catalog))
+            .await
     }
 
     pub async fn delete_lookup(&self, lookup_id: String) -> Result<()> {
@@ -137,7 +183,7 @@ impl Database {
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(
-            version <= 2,
+            version <= 3,
             "This history was created by a newer version of Dictionary"
         );
         if version == 0 {
@@ -162,6 +208,11 @@ impl Database {
             }
             tx.commit()?;
         }
+        if version < 3 {
+            let tx = connection.transaction()?;
+            tx.execute_batch(include_str!("../migrations/003_settings.sql"))?;
+            tx.commit()?;
+        }
         let mut db = Self {
             connection,
             _lock: lock,
@@ -170,20 +221,36 @@ impl Database {
         Ok(db)
     }
 
+    pub fn read_state<T: serde::de::DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
+        let json: Option<String> = self
+            .connection
+            .query_row("SELECT payload FROM app_state WHERE key=?1", [key], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        json.map(|value| serde_json::from_str(&value).context("Cannot read application settings"))
+            .transpose()
+    }
+
+    pub fn write_state<T: serde::Serialize>(&mut self, key: &str, value: &T) -> Result<()> {
+        self.connection.execute("INSERT INTO app_state(key, payload) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET payload=excluded.payload", params![key, serde_json::to_string(value)?])?;
+        Ok(())
+    }
+
     pub fn insert(&mut self, attempt: &Attempt, skill: &SkillSnapshot) -> Result<()> {
         let tx = self.connection.transaction()?;
         tx.execute("INSERT OR IGNORE INTO skill_snapshots(hash, name, source, content) VALUES (?1, ?2, ?3, ?4)",
             params![skill.hash, skill.name, skill.path.to_string_lossy(), skill.content])?;
-        tx.execute("INSERT INTO lookups(id, input, search_key, direction, created_at, cache_key) VALUES (?1, ?2, ?3, 'en_zh', ?4, ?5) ON CONFLICT(id) DO NOTHING",
-            params![attempt.lookup_id, attempt.input, attempt.input.nfc().collect::<String>().to_lowercase(), attempt.created_at, lookup_key(&attempt.input)])?;
-        let original: String = tx.query_row(
-            "SELECT input FROM lookups WHERE id=?1",
+        tx.execute("INSERT INTO lookups(id, input, search_key, direction, created_at, cache_key, requested_direction) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(id) DO NOTHING",
+            params![attempt.lookup_id, attempt.input, attempt.input.nfc().collect::<String>().to_lowercase(), attempt.direction.key(), attempt.created_at, lookup_key(&attempt.input), serde_json::to_value(attempt.requested_direction)?.as_str()])?;
+        let original: (String, String) = tx.query_row(
+            "SELECT input, direction FROM lookups WHERE id=?1",
             [&attempt.lookup_id],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )?;
         ensure!(
-            original == attempt.input,
-            "A regenerated attempt must preserve the original input"
+            original.0 == attempt.input && original.1 == attempt.direction.key(),
+            "A regenerated attempt must preserve the original input and direction"
         );
         tx.execute("INSERT INTO attempts(id, lookup_id, attempt_number, state, created_at, model, effort, skill_hash, payload) VALUES (?1, ?2, (SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM attempts WHERE lookup_id=?2), 'pending', ?3, ?4, ?5, ?6, ?7)",
             params![attempt.id, attempt.lookup_id, attempt.created_at, attempt.setup.model, attempt.setup.effort, attempt.skill_hash, serde_json::to_string(attempt)?])?;
@@ -215,7 +282,7 @@ impl Database {
 
     pub fn history(&self) -> Result<Vec<HistoryEntry>> {
         let mut statement = self.connection.prepare(
-            "SELECT a.id, l.input, a.created_at, a.state, json_extract(a.payload, '$.answer'), l.id FROM attempts a JOIN lookups l ON a.lookup_id=l.id ORDER BY a.created_at DESC, a.rowid DESC LIMIT 200")?;
+            "SELECT a.id, l.input, a.created_at, a.state, json_extract(a.payload, '$.answer'), l.id, l.direction FROM attempts a JOIN lookups l ON a.lookup_id=l.id ORDER BY a.created_at DESC, a.rowid DESC LIMIT 200")?;
         let rows = statement
             .query_map([], |r| {
                 Ok((
@@ -225,33 +292,39 @@ impl Database {
                     r.get::<_, String>(3)?,
                     r.get::<_, String>(4)?,
                     r.get::<_, String>(5)?,
+                    r.get::<_, String>(6)?,
                 ))
             })?
             .collect::<rusqlite::Result<Vec<_>>>()?;
         rows.into_iter()
-            .map(|(id, input, created_at, state, answer, lookup_id)| {
-                Ok(HistoryEntry {
-                    id,
-                    lookup_id,
-                    input,
-                    created_at,
-                    status: serde_json::from_value(serde_json::Value::String(state))?,
-                    translation: crate::model::translation_preview(&answer),
-                    generating: !answer.is_empty(),
-                })
-            })
+            .map(
+                |(id, input, created_at, state, answer, lookup_id, direction)| {
+                    let direction: Direction =
+                        serde_json::from_value(serde_json::Value::String(direction))?;
+                    Ok(HistoryEntry {
+                        id,
+                        lookup_id,
+                        input,
+                        direction,
+                        created_at,
+                        status: serde_json::from_value(serde_json::Value::String(state))?,
+                        translation: crate::model::translation_preview_for(&answer, direction),
+                        generating: !answer.is_empty(),
+                    })
+                },
+            )
             .collect()
     }
 
-    pub fn cached(&self, input: &str) -> Result<Option<Attempt>> {
+    pub fn cached(&self, input: &str, direction: Direction) -> Result<Option<Attempt>> {
         let json: Option<String> = self
             .connection
             .query_row(
                 "SELECT a.payload FROM attempts a JOIN lookups l ON a.lookup_id=l.id
-             WHERE l.direction='en_zh' AND l.cache_key=?1 AND a.state='succeeded'
+             WHERE l.direction=?2 AND l.cache_key=?1 AND a.state='succeeded'
                AND length(trim(json_extract(a.payload, '$.answer'))) > 0
              ORDER BY a.created_at DESC, a.rowid DESC LIMIT 1",
-                [lookup_key(input)],
+                params![lookup_key(input), direction.key()],
                 |r| r.get(0),
             )
             .optional()?;

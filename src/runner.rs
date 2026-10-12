@@ -94,7 +94,16 @@ pub async fn run(
         .arg(format!(
             "model_reasoning_effort={}",
             serde_json::to_string(&attempt.setup.effort).expect("string serialization")
-        ))
+        ));
+    if let Some(tier) = &attempt.setup.service_tier {
+        command
+            .arg("-c")
+            .arg(format!("service_tier=\"{}\"", tier.config_value()));
+        if matches!(tier, crate::model::ServiceTier::Fast) {
+            command.args(["-c", "features.fast_mode=true"]);
+        }
+    }
+    command
         .arg("-")
         .current_dir(working_directory)
         .stdin(Stdio::piped())
