@@ -49,7 +49,7 @@ Searching an expression first opens its running or queued attempt when one exist
 
 Each newly generated lookup has fresh model context. Previously viewed history is never silently appended to a new request. The first version allows three concurrent CLI processes and persists additional requests in a FIFO queue. Look up always submits the current input; active and queued keys are reserved before admitting another request, so repeated clicks reuse one attempt. Regenerate bypasses saved cache but shares this active-key guard. Stop beside the selected entry’s status cancels only that attempt. Queued cancellation never starts a process. Switching views or choosing New Lookup does not cancel work, and background events never navigate away from the selected entry. Each attempt owns its output, activity, cancellation, usage, and timing. Request IDs discard stale navigation responses.
 
-Use Enter to submit and Shift+Enter to insert a newline; Command+Enter remains a submission shortcut. Use Command+L to focus the input, Command+B to toggle history, and Command+, for Settings. Respect Chinese IME composition before handling submission keys. Keep result text selectable and support copying the entry as Markdown.
+Use Enter to submit and Shift+Enter to insert a newline; Command+Enter remains a submission shortcut. Use Command+L to return to Dictionary and focus its input, Command+F to open History, Command+B to toggle the sidebar, and Command+, for Settings. Respect Chinese IME composition before handling submission keys. Keep result text selectable and support copying the entry as Markdown.
 
 Auto direction uses a local script heuristic and exposes the resolved direction before submission. Ambiguous or mixed input requires a direction choice. Preserve the original input, including punctuation and line breaks.
 
@@ -202,14 +202,18 @@ Validation evidence and current limits: [Phase 2 validation](../docs/phase-2-val
 
 Deliver searchable, paginated history and attempt details with retry, regeneration, cancellation, deletion, and restart recovery. Keep saved results usable while other requests are active. Every action has consistent consequences in storage and the request counters.
 
+Use a dedicated History page opened by the ellipsis icon button beside the sidebar's History heading. Keep recent entries directly below that heading. Search original inputs across the whole database with direction/outcome filters and 25-row cursor pagination. Show per-attempt metadata and version numbers; opening a row returns to Dictionary, with Back to History preserving the search, filters, page, and scroll position. The History page's back arrow returns to the current lookup without clearing its input. Live progress is checkpointed to support recovery after unexpected termination.
+
 ### Acceptance criteria
 
-- [ ] English and Chinese substring search find saved inputs; opening an entry performs no inference.
+- [x] English and Chinese substring search find saved inputs; opening an entry performs no inference.
 - [x] Retry and regeneration create separately measured attempts and preserve previous output (available through Regenerate on saved attempts).
-- [ ] Cancellation and timeout stop owned work and finalize the appropriate status without duplicate records.
-- [ ] Closing or crashing during a request leaves a recoverable interrupted attempt on restart.
+- [x] Cancellation and timeout stop owned work and finalize the appropriate status without duplicate records.
+- [x] Graceful closing saves cancelled running/queued attempts. After a crash, unfinished attempts become interrupted on restart and retain their last saved output, activity, reported usage, and available timing metadata without automatic retry.
 - [x] Deletion removes the intended lookup and associated attempts; history and analysis query results agree afterward (verified with persisted request/token aggregates).
-- [ ] Integration tests use a controllable fake CLI to exercise slow output, cancellation, process failure, and application restart without external model calls.
+- [x] Integration tests use a controllable fake CLI to exercise slow output, cancellation, process failure, and application restart without external model calls.
+
+Validation evidence and native inspection limits: [Phase 3 validation](../docs/phase-3-validation.md).
 
 ## Phase 4: Analysis page
 

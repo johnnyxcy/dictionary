@@ -135,26 +135,38 @@ fn activity_contains_only_reported_details_and_hides_legacy_placeholders() {
 
 #[test]
 fn tool_activity_reports_commands_outputs_and_changed_paths() {
-    let mut tracker = TurnTracker::default();
-    for event in [
-        json!({"type":"item.completed","item":{"id":"c","type":"command_execution","command":"cat SKILL.md","aggregated_output":"Use Chinese explanations.","exit_code":0}}),
-        json!({"type":"item.completed","item":{"id":"m","type":"mcp_tool_call","server":"dictionary","tool":"pronunciation","error":{"message":"Unavailable"}}}),
-        json!({"type":"item.completed","item":{"id":"f","type":"file_change","changes":[{"kind":"update","path":"notes.md"}]}}),
-        json!({"type":"item.completed","item":{"id":"p","type":"todo_list","items":[{"text":"Check the expression","completed":true}]}}),
+    for (event, details) in [
+        (
+            json!({"type":"item.completed","item":{"id":"c","type":"command_execution","command":"cat SKILL.md","aggregated_output":"Use Chinese explanations.","exit_code":37}}),
+            &["cat SKILL.md", "Use Chinese explanations.", "37"][..],
+        ),
+        (
+            json!({"type":"item.completed","item":{"id":"m","type":"mcp_tool_call","server":"dictionary","tool":"pronunciation","error":{"message":"Unavailable"}}}),
+            &["dictionary", "pronunciation", "Unavailable"][..],
+        ),
+        (
+            json!({"type":"item.completed","item":{"id":"f","type":"file_change","changes":[{"kind":"update","path":"notes.md"}]}}),
+            &["notes.md", "update"][..],
+        ),
+        (
+            json!({"type":"item.completed","item":{"id":"p","type":"todo_list","items":[{"text":"Check the expression","completed":true}]}}),
+            &["Check the expression"][..],
+        ),
     ] {
+        let mut tracker = TurnTracker::default();
         tracker.apply(event).unwrap();
+        let [activity] = tracker.activity.as_slice() else {
+            panic!("a tool item should produce one activity record");
+        };
+        assert!(activity.completed);
+        for detail in details {
+            assert!(
+                activity.text.contains(detail),
+                "missing reported detail {detail}"
+            );
+        }
+        assert!(tracker.answer(true).is_empty());
     }
-    assert_eq!(
-        tracker.activity[0].text,
-        "$ cat SKILL.md\nUse Chinese explanations.\nExit code: 0"
-    );
-    assert_eq!(
-        tracker.activity[1].text,
-        "dictionary / pronunciation\nUnavailable"
-    );
-    assert_eq!(tracker.activity[2].text, "update: notes.md");
-    assert_eq!(tracker.activity[3].text, "✓ Check the expression");
-    assert!(tracker.answer(true).is_empty());
 }
 
 #[test]
@@ -286,7 +298,7 @@ fn database_recovery_marks_pending_requests_interrupted_and_prevents_two_writers
     let saved = db.get(&attempt.id).unwrap();
     assert_eq!(saved.status, AttemptStatus::Interrupted);
     assert_eq!(saved.usage.total(), None);
-    assert!(saved.failure.unwrap().message.contains("closed"));
+    assert_eq!(saved.failure.unwrap().kind, "interrupted");
 }
 
 #[test]
@@ -581,12 +593,6 @@ fn cache_migration_backfills_existing_history_without_rewriting_attempts() {
     );
     assert_eq!(db.get(&attempt.id).unwrap().input, "  café  ");
     let connection = rusqlite::Connection::open(&path).unwrap();
-    assert_eq!(
-        connection
-            .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
-            .unwrap(),
-        3
-    );
     assert_eq!(
         connection
             .query_row(

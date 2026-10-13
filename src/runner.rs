@@ -12,7 +12,7 @@ use tokio::{
 };
 
 use crate::{
-    model::{Activity, Attempt, AttemptStatus, Failure, now},
+    model::{Activity, Attempt, AttemptStatus, Failure, Usage, now},
     protocol::{JsonlDecoder, TurnTracker},
 };
 
@@ -21,6 +21,43 @@ pub struct Progress {
     pub attempt_id: String,
     pub answer: String,
     pub activity: Vec<Activity>,
+    pub metadata: ProgressMetadata,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ProgressMetadata {
+    pub started_at: Option<String>,
+    pub first_answer_ms: Option<u64>,
+    pub thread_id: Option<String>,
+    pub reported_model: Option<String>,
+    pub usage: Usage,
+}
+
+impl Progress {
+    fn snapshot(attempt: &Attempt) -> Self {
+        Self {
+            attempt_id: attempt.id.clone(),
+            answer: attempt.answer.clone(),
+            activity: attempt.activity.clone(),
+            metadata: ProgressMetadata {
+                started_at: attempt.started_at.clone(),
+                first_answer_ms: attempt.first_answer_ms,
+                thread_id: attempt.thread_id.clone(),
+                reported_model: attempt.reported_model.clone(),
+                usage: attempt.usage.clone(),
+            },
+        }
+    }
+
+    pub fn apply_to(&self, attempt: &mut Attempt) {
+        attempt.answer = self.answer.clone();
+        attempt.activity = self.activity.clone();
+        attempt.started_at = self.metadata.started_at.clone();
+        attempt.first_answer_ms = self.metadata.first_answer_ms;
+        attempt.thread_id = self.metadata.thread_id.clone();
+        attempt.reported_model = self.metadata.reported_model.clone();
+        attempt.usage = self.metadata.usage.clone();
+    }
 }
 
 /// Dedicated process group: cancellation never targets the user's shared daemon.
@@ -126,6 +163,7 @@ pub async fn run(
     };
     attempt.started_at = Some(now());
     attempt.status = AttemptStatus::Running;
+    let _ = progress.try_send(Progress::snapshot(&attempt));
     let mut stdin = child.stdin.take().expect("piped stdin");
     let stdout = child.stdout.take().expect("piped stdout");
     let stderr = child.stderr.take().expect("piped stderr");
@@ -142,8 +180,6 @@ pub async fn run(
     let mut exit = None;
     let mut eof = false;
     let mut forced = None;
-    let mut previous_answer = String::new();
-    let mut previous_activity = Vec::new();
 
     loop {
         if eof && exit.is_some() {
@@ -181,13 +217,21 @@ pub async fn run(
                             break;
                         }
                         let answer = tracker.answer(false);
-                        if answer != previous_answer || tracker.activity != previous_activity {
+                        if answer != attempt.answer
+                            || tracker.activity != attempt.activity
+                            || tracker.thread_id != attempt.thread_id
+                            || tracker.reported_model != attempt.reported_model
+                            || tracker.usage != attempt.usage
+                        {
                             if !answer.is_empty() { attempt.first_answer_ms.get_or_insert_with(|| millis(submitted)); }
-                            previous_answer = answer.clone();
-                            previous_activity = tracker.activity.clone();
                             // Intermediate snapshots can be dropped under backpressure;
                             // the final persisted answer is always delivered separately.
-                            let _ = progress.try_send(Progress { attempt_id: attempt.id.clone(), answer, activity: tracker.activity.clone() });
+                            attempt.answer = answer;
+                            attempt.activity = tracker.activity.clone();
+                            attempt.thread_id = tracker.thread_id.clone();
+                            attempt.reported_model = tracker.reported_model.clone();
+                            attempt.usage = tracker.usage.clone();
+                            let _ = progress.try_send(Progress::snapshot(&attempt));
                         }
                     }
                 }

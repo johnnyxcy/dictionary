@@ -15,6 +15,7 @@ use tokio::{
 use crate::{
     direction::{Direction, DirectionChoice},
     discovery::{self, AppPaths},
+    history::{HistoryPage, HistoryQuery},
     model::{
         Attempt, AttemptStatus, Failure, HistoryEntry, Setup, SkillSnapshot, compose_prompt,
         lookup_key, now, validate_input,
@@ -28,6 +29,10 @@ pub const MAX_CONCURRENT_LOOKUPS: usize = 3;
 pub type RequestId = u64;
 
 pub enum Command {
+    QueryHistory {
+        request_id: RequestId,
+        query: HistoryQuery,
+    },
     Lookup {
         request_id: RequestId,
         input: String,
@@ -50,6 +55,15 @@ pub enum Command {
 #[derive(Clone, Debug)]
 pub enum Event {
     History(Vec<HistoryEntry>),
+    HistoryPage {
+        request_id: RequestId,
+        page: HistoryPage,
+    },
+    HistoryFailed {
+        request_id: RequestId,
+        message: String,
+    },
+    HistoryChanged,
     Connecting,
     Ready(Setup),
     Settings(Box<SettingsState>),
@@ -152,6 +166,7 @@ struct Job {
     prompt: Option<String>,
     cancellation: Option<watch::Sender<bool>>,
     submitted: Instant,
+    checkpoint_failed: bool,
 }
 
 enum LookupRequest {
@@ -250,12 +265,14 @@ impl Coordinator {
                 prompt: Some(prompt),
                 cancellation: None,
                 submitted,
+                checkpoint_failed: false,
             },
         );
         Ok(attempt)
     }
 
     async fn history(&self, events: &Sender<Event>) {
+        events.send(Event::HistoryChanged).await.ok();
         match self.store.history().await {
             Ok(history) => {
                 events.send(Event::History(history)).await.ok();
@@ -319,13 +336,24 @@ impl Coordinator {
             });
             self.task_attempts.insert(task.id(), id);
             events.send(Event::Started(Box::new(initial))).await.ok();
+            events.send(Event::HistoryChanged).await.ok();
         }
     }
 
     async fn update(&mut self, update: Progress, events: &Sender<Event>) {
         if let Some(job) = self.jobs.get_mut(&update.attempt_id) {
-            job.attempt.answer = update.answer.clone();
-            job.attempt.activity = update.activity.clone();
+            update.apply_to(&mut job.attempt);
+            // Checkpoint real output before announcing it. Restart recovery can
+            // retain the latest saved partial result without replaying inference.
+            match self.store.save(job.attempt.clone()).await {
+                Ok(()) => job.checkpoint_failed = false,
+                Err(error) => {
+                    if !job.checkpoint_failed {
+                        events.send(Event::Notice(format!("Cannot save live progress: {error:#}. Keep Dictionary open until the result is saved, or copy it before closing."))).await.ok();
+                    }
+                    job.checkpoint_failed = true;
+                }
+            }
             events.send(Event::Progress(update)).await.ok();
         }
     }
@@ -482,6 +510,13 @@ async fn work(
             command = commands.recv() => {
                 let Ok(command) = command else { break; };
                 let (request_id, result) = match command {
+                    Command::QueryHistory { request_id, query } => {
+                        match coordinator.store.history_page(query).await {
+                            Ok(page) => { events.send(Event::HistoryPage { request_id, page }).await.ok(); }
+                            Err(error) => { events.send(Event::HistoryFailed { request_id, message: format!("Cannot load history: {error:#}") }).await.ok(); }
+                        }
+                        continue;
+                    }
                     Command::Lookup { request_id, input, direction } =>
                         (request_id, coordinator.accept(setup.as_ref(), LookupRequest::Search(input, direction)).await),
                     Command::Regenerate { request_id, attempt_id } =>
@@ -532,7 +567,11 @@ async fn work(
                     }
                 };
                 match result {
-                    Ok(attempt) => { events.send(Event::Opened { request_id, attempt: Box::new(attempt) }).await.ok(); }
+                    Ok(attempt) => {
+                        let active = attempt.status.is_active();
+                        events.send(Event::Opened { request_id, attempt: Box::new(attempt) }).await.ok();
+                        if active { events.send(Event::HistoryChanged).await.ok(); }
+                    }
                     Err(error) => { events.send(Event::RequestFailed { request_id, message: format!("Cannot open lookup: {error:#}") }).await.ok(); }
                 }
             }

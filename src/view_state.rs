@@ -95,8 +95,7 @@ impl LookupState {
             }
             Event::Progress(progress) => {
                 if let Some(attempt) = self.active.get_mut(&progress.attempt_id) {
-                    attempt.answer = progress.answer.clone();
-                    attempt.activity = progress.activity.clone();
+                    progress.apply_to(attempt);
                     update_history(&mut self.history, attempt);
                     if self.selected.as_ref().is_some_and(|a| a.id == attempt.id) {
                         self.selected = Some(attempt.clone());
