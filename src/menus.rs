@@ -59,7 +59,7 @@ pub fn init(cx: &mut App) {
             if !window.has_active_dialog(cx) {
                 window.open_dialog(cx, |dialog, _, _| {
                     dialog
-                        .title("About Dictionary")
+                        .title("About JDict")
                         .w(px(380.))
                         .child(format!("Version {}", env!("CARGO_PKG_VERSION")))
                         .child("English ↔ Simplified Chinese dictionary with local history.")
@@ -77,18 +77,18 @@ pub fn init(cx: &mut App) {
     cx.on_action(|_: &DockSettings, cx| open_from_dock(&ui::OpenSettings, cx));
 
     cx.set_menus([
-        Menu::new("Dictionary").items([
-            MenuItem::action("About Dictionary", About),
+        Menu::new("JDict").items([
+            MenuItem::action("About JDict", About),
             MenuItem::separator(),
             MenuItem::action("Settings…", ui::OpenSettings),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
-            MenuItem::action("Hide Dictionary", Hide),
+            MenuItem::action("Hide JDict", Hide),
             MenuItem::action("Hide Others", HideOthers),
             MenuItem::action("Show All", ShowAll),
             MenuItem::separator(),
-            MenuItem::action("Quit Dictionary", ui::Quit),
+            MenuItem::action("Quit JDict", ui::Quit),
         ]),
         Menu::new("File").items([
             MenuItem::action("New Lookup", ui::NewLookup),
@@ -106,7 +106,7 @@ pub fn init(cx: &mut App) {
             MenuItem::os_action("Select All", SelectAll, OsAction::SelectAll),
         ]),
         Menu::new("View").items([
-            MenuItem::action("Dictionary", ui::FocusLookup),
+            MenuItem::action("Lookup", ui::FocusLookup),
             MenuItem::action("History", ui::FocusHistory),
             MenuItem::action("Analysis", ui::FocusAnalysis),
             MenuItem::separator(),
@@ -116,13 +116,13 @@ pub fn init(cx: &mut App) {
             MenuItem::action("Minimize", Minimize),
             MenuItem::action("Zoom", Zoom),
             MenuItem::separator(),
-            MenuItem::action("Show Dictionary", ShowWindow),
+            MenuItem::action("Show JDict", ShowWindow),
         ]),
     ]);
     // Register after the main menu: GPUI's native menu actions share a registry.
     // macOS supplies the Dock's standard Options, Hide/Show, and Quit entries.
     cx.set_dock_menu(vec![
-        MenuItem::action("Show Dictionary", ShowWindow),
+        MenuItem::action("Show JDict", ShowWindow),
         MenuItem::separator(),
         MenuItem::action("New Lookup", DockNewLookup),
         MenuItem::action("History", DockHistory),
@@ -149,7 +149,7 @@ fn open_from_dock(action: &dyn Action, cx: &mut App) {
 }
 
 fn with_window(cx: &mut App, f: impl FnOnce(&mut Window, &mut App) + 'static) {
-    // Dictionary owns one window, which may be inactive when invoked from Dock.
+    // JDict owns one window, which may be inactive when invoked from Dock.
     if let Some(handle) = cx.active_window().or_else(|| cx.windows().first().copied()) {
         // Global actions can be dispatched inside an existing window update.
         // Defer the window access until that borrow has been released.

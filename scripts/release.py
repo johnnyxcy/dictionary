@@ -33,7 +33,7 @@ def main():
     if args.tag and args.tag != f"v{version}":
         parser.error(f"Tag {args.tag!r} does not match Cargo.toml version v{version}")
     if args.check_only:
-        print(f"Ready to build Dictionary {version} for macOS arm64")
+        print(f"Ready to build JDict {version} for macOS arm64")
         return
 
     command = [sys.executable, str(root / "scripts/bundle.py")]
@@ -41,20 +41,20 @@ def main():
         command.append("--skip-build")
     run(*command, cwd=root)
     target = Path(metadata["target_directory"])
-    bundle = target / "Dictionary.app"
+    bundle = target / "JDict.app"
     with (bundle / "Contents/Info.plist").open("rb") as source:
         info = plistlib.load(source)
     if info.get("CFBundleShortVersionString") != version or "LSEnvironment" in info:
         parser.error("Release bundle has an unexpected version or development environment")
-    executable = bundle / "Contents/MacOS/dictionary"
+    executable = bundle / "Contents/MacOS/jdict"
     architectures = run("/usr/bin/lipo", "-archs", str(executable), capture_output=True, text=True).stdout.split()
     if architectures != ["arm64"]:
         parser.error(f"Release executable must contain only arm64, found {architectures}")
 
     destination = target / "release-assets"
     destination.mkdir(parents=True, exist_ok=True)
-    archive_name = f"Dictionary-{version}-macos-arm64.zip"
-    with tempfile.TemporaryDirectory(prefix="dictionary-release-", dir=target) as staging:
+    archive_name = f"JDict-{version}-macos-arm64.zip"
+    with tempfile.TemporaryDirectory(prefix="jdict-release-", dir=target) as staging:
         staging = Path(staging)
         archive = staging / archive_name
         run("/usr/bin/ditto", "-c", "-k", "--sequesterRsrc", "--keepParent", str(bundle), str(archive))
@@ -64,7 +64,7 @@ def main():
         run("/usr/bin/ditto", "-x", "-k", str(archive), str(extracted))
         unpacked = extracted / bundle.name
         run("/usr/bin/codesign", "--verify", "--deep", "--strict", str(unpacked))
-        if not os.access(unpacked / "Contents/MacOS/dictionary", os.X_OK):
+        if not os.access(unpacked / "Contents/MacOS/jdict", os.X_OK):
             parser.error("The archived app executable lost its executable permission")
         if (unpacked / "Contents/Resources/LICENSE.txt").read_bytes() != (root / "LICENSE").read_bytes():
             parser.error("The archived app is missing the project license")

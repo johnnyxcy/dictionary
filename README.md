@@ -1,6 +1,6 @@
-# Dictionary
+# JDict
 
-A native macOS learning dictionary built with Rust and GPUI Kit. It runs an independent `codex exec` request with your installed dictionary skill for each lookup and keeps entries and measurements in local SQLite history.
+JDict is a native macOS learning dictionary built with Rust and GPUI Kit. It runs an independent `codex exec` request with your installed dictionary skill for each lookup and keeps entries and measurements in local SQLite history.
 
 English ↔ Simplified Chinese lookups, persistent settings, searchable history with restart recovery, and local usage analysis are implemented. Phase 5 adds a local macOS app bundle, Finder-compatible CLI setup, appearance settings, accessible chart data, and protected database upgrades. See the [implementation plan](plans/dictionary-app.md) and [release validation](docs/phase-5-validation.md) for acceptance results and remaining manual checks.
 
@@ -21,16 +21,16 @@ For an optimized application you can launch from Finder:
 
 ```sh
 python3 scripts/bundle.py
-open 'target/Dictionary.app'
+open 'target/JDict.app'
 ```
 
-You can move `Dictionary.app` to Applications. The bundle targets macOS 15 or later on the build machine's architecture, includes its icon and MIT license, and uses ad-hoc signing without a certificate. Packaging verifies the signature and rejects non-system dynamic libraries. Rust and Xcode are build requirements; using the bundle requires the CLI, its runtime (if applicable), and your dictionary skill. Bundles are not signed with a Developer ID certificate or notarized by Apple.
+You can move `JDict.app` to Applications. The bundle targets macOS 15 or later on the build machine's architecture, includes its icon and MIT license, and uses ad-hoc signing without a certificate. Packaging verifies the signature and rejects non-system dynamic libraries. Rust and Xcode are build requirements; using the bundle requires the CLI, its runtime (if applicable), and your dictionary skill. Bundles are not signed with a Developer ID certificate or notarized by Apple.
 
-The macOS menu bar registers **Dictionary**, **File**, **Edit**, **View**, and **Window** menus, including About, Settings, Services, standard editing commands, navigation, hiding, minimizing, and closing. Right-click the running app's Dock icon for **Show Dictionary**, **New Lookup**, **History**, **Analysis**, and **Settings…**. Dock navigation brings the existing window forward; an open settings draft stays in place until resolved. Clicking the Dock icon also raises the existing window. Closing the last window or choosing Quit retains the same cancellation and save behavior.
+The macOS menu bar registers **JDict**, **File**, **Edit**, **View**, and **Window** menus, including About, Settings, Services, standard editing commands, navigation, hiding, minimizing, and closing. Right-click the running app's Dock icon for **Show JDict**, **New Lookup**, **History**, **Analysis**, and **Settings…**. Dock navigation brings the existing window forward; an open settings draft stays in place until resolved. Clicking the Dock icon also raises the existing window. Closing the last window or choosing Quit retains the same cancellation and save behavior.
 
 On first launch, the app selects your configured CLI model when available, otherwise the catalog default, and prefers Low effort when supported. Later launches restore your saved settings. The chosen pair appears at the bottom of the sidebar. It reuses CLI authentication and leaves your global CLI configuration unchanged.
 
-Enter text and press **Enter**, or click **Look up**. **Shift+Enter** inserts a newline, and the compact input expands for multiline text. **Command+Enter** also submits. **Command+N** starts New Lookup, **Command+L** returns to Dictionary and focuses the input, **Command+F** opens History, and **Command+B** toggles the sidebar. Native File and Edit menus expose navigation and standard editing commands. Focus a sidebar entry with Tab and open it with Enter or Space. The result supports selection, scrolling, and the **Copy** icon copies it as Markdown. Up to **three lookups run concurrently**; additional requests wait in a first-in, first-out queue. **Look up** always submits the current input. **Stop**, beside the selected entry’s running status, cancels only that entry (or removes it from the queue before it starts). New Lookup and switching history entries leave other requests running; their completion never changes your selected view. Select an item in History to read its saved result without generating another entry.
+Enter text and press **Enter**, or click **Look up**. **Shift+Enter** inserts a newline, and the compact input expands for multiline text. **Command+Enter** also submits. **Command+N** starts New Lookup, **Command+L** returns to Lookup and focuses the input, **Command+F** opens History, and **Command+B** toggles the sidebar. Native File and Edit menus expose navigation and standard editing commands. Focus a sidebar entry with Tab and open it with Enter or Space. The result supports selection, scrolling, and the **Copy** icon copies it as Markdown. Up to **three lookups run concurrently**; additional requests wait in a first-in, first-out queue. **Look up** always submits the current input. **Stop**, beside the selected entry’s running status, cancels only that entry (or removes it from the queue before it starts). New Lookup and switching history entries leave other requests running; their completion never changes your selected view. Select an item in History to read its saved result without generating another entry.
 
 Searching an expression that is already running or queued in the same translation direction opens that attempt. Otherwise, searching an already saved expression opens its latest successful result, including while all slots are busy or the CLI is unavailable. It makes no model request and adds no attempt or token usage. Matching ignores surrounding whitespace and canonical Unicode differences, but preserves case, punctuation, and internal whitespace. Failed or incomplete attempts never replace a successful cached result. Use **Regenerate**, immediately left of Copy, to request a fresh entry for the selected result's original input and direction using the current configuration. Earlier attempts and their measurements remain in history. Repeated clicks on Look up or Regenerate reuse an active attempt for the same expression and direction.
 
@@ -48,14 +48,14 @@ To build a local development app bundle:
 
 ```sh
 python3 scripts/bundle-dev.py
-open 'target/Dictionary Dev.app'
+open 'target/JDict Dev.app'
 ```
 
 Use `--skip-build` to package an existing build. Both entry points use the same bundle validation.
 
 ## Releases
 
-[GitHub Releases](https://github.com/johnnyxcy/dictionary/releases) provides Apple Silicon downloads for macOS 15 or later: `Dictionary-<version>-macos-arm64.zip` and its `.sha256` checksum. Extract the ZIP and move `Dictionary.app` to Applications. The CLI and dictionary skill requirements above still apply.
+The release workflow publishes Apple Silicon downloads for macOS 15 or later to [GitHub Releases](https://github.com/johnnyxcy/dictionary/releases): `JDict-<version>-macos-arm64.zip` and its `.sha256` checksum. Extract the ZIP and move `JDict.app` to Applications. The CLI and dictionary skill requirements above still apply.
 
 The [release workflow](.github/workflows/release.yml) automatically publishes when a version tag is pushed. The tag must exactly match the package version in `Cargo.toml`, prefixed with `v`. It checks formatting, lint, and tests, then builds the optimized app and verifies its arm64 architecture and signature after extracting the ZIP. Publishing runs only after these checks pass, with generated release notes; tags with a prerelease version are marked as prereleases. A manual workflow run builds downloadable Actions artifacts without publishing a release. It uses the repository's built-in token and needs no additional secrets.
 
@@ -71,7 +71,7 @@ Build and verify the same assets locally on Apple Silicon with:
 ```sh
 python3 scripts/release.py --tag v0.1.0
 cd target/release-assets
-shasum -a 256 -c Dictionary-0.1.0-macos-arm64.zip.sha256
+shasum -a 256 -c JDict-0.1.0-macos-arm64.zip.sha256
 ```
 
 Omit `--tag` for a local build without tag validation, or use `--check-only --tag v0.1.0` to check the host and version without building. Published assets are not overwritten when a workflow is rerun for an existing release.
@@ -129,7 +129,7 @@ Optional development overrides (model and skill overrides seed the initial prefe
 | `DICTIONARY_SKILL_PATH` | Absolute path to the selected `SKILL.md`; useful if different copies are installed. |
 | `DICTIONARY_DATA_DIR` | Alternate directory for history and the isolated CLI working directory. |
 
-The default database is `~/Library/Application Support/Dictionary/history.sqlite3`. It contains original inputs, Markdown entries, outcomes, immutable request configuration, skill snapshots, reported usage, and timings. The recent sidebar shows the latest 200 attempts; History and cached lookups cover the entire database. Schema version 4 adds history ordering and outcome indexes, preserving existing attempt payloads, settings, and skill snapshots. Older entries keep their English → Chinese direction. A file lock prevents competing app instances from using the same history.
+The default database is `~/Library/Application Support/Dictionary/history.sqlite3`. JDict retains this directory, the app identifier, and the `DICTIONARY_*` overrides for compatibility with existing installations; the rename requires no data migration. It contains original inputs, Markdown entries, outcomes, immutable request configuration, skill snapshots, reported usage, and timings. The recent sidebar shows the latest 200 attempts; History and cached lookups cover the entire database. Schema version 4 adds history ordering and outcome indexes, preserving existing attempt payloads, settings, and skill snapshots. Older entries keep their English → Chinese direction. A file lock prevents competing app instances from using the same history.
 
 Before upgrading an existing schema, the app creates a consistent SQLite backup named `history.pre-v<old-version>-<id>.sqlite3` beside the database, including committed WAL data. All pending migrations run in one transaction. A failed migration rolls back and reports the backup path; failure to create a backup prevents the upgrade. Databases from newer versions are rejected without modification. Startup errors open a diagnostic window with Copy details, Open data folder, and Quit where available; the app never resets history to recover from an error.
 

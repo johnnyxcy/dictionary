@@ -33,10 +33,10 @@ pub fn error_panel(message: &str, directory: Option<&Path>, cx: &App) -> Div {
             div()
                 .text_xl()
                 .font_weight(FontWeight::SEMIBOLD)
-                .child("Dictionary could not start"),
+                .child("JDict could not start"),
         )
         .child(div().text_sm().child(
-            "Your history has not been reset. Resolve the problem below, then reopen Dictionary.",
+            "Your history has not been reset. Resolve the problem below, then reopen JDict.",
         ))
         .child(
             div()

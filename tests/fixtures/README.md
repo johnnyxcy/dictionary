@@ -11,10 +11,10 @@ Process tests replay this capture through a local fake executable. Normal tests 
 After `cargo build --locked`, launch an isolated profile:
 
 ```sh
-python3 scripts/bundle-dev.py --name 'Dictionary Stream Test' \
+python3 scripts/bundle-dev.py --name 'JDict Stream Test' \
   --data-dir /tmp/dictionary-stream-test \
   --cli "$PWD/tests/fixtures/activity-cli.py"
-open 'target/Dictionary Stream Test.app'
+open 'target/JDict Stream Test.app'
 ```
 
 Submit `break the ice` for success, or `simulate failure` for a failure after partial output. Each run takes approximately 14 seconds. No credentials or external service are used. Never use these synthetic counters as real usage data.
@@ -24,10 +24,10 @@ Submit `break the ice` for success, or `simulate failure` for a failure after pa
 `concurrent-cli.py` supplies per-input partial answers, activity, and token counters. Each process waits for a release file, allowing tests to control completion order without timing guesses. Automated service tests exercise three simultaneous processes, queue advancement, active-key deduplication, cached navigation at capacity, regeneration, targeted cancellation, failure isolation, and shutdown cleanup. View-state tests separately cover delayed navigation and background updates.
 
 ```sh
-python3 scripts/bundle-dev.py --name 'Dictionary Concurrency Review' \
+python3 scripts/bundle-dev.py --name 'JDict Concurrency Review' \
   --data-dir /tmp/dictionary-concurrency-ui-qa \
   --cli "$PWD/tests/fixtures/concurrent-cli.py"
-open 'target/Dictionary Concurrency Review.app'
+open 'target/JDict Concurrency Review.app'
 ```
 
 Submit several distinct inputs. The first three run; subsequent entries show Queued. To finish one, create its gate file:

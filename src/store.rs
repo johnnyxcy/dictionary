@@ -193,7 +193,7 @@ impl Database {
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(
             version <= 4,
-            "This history was created by a newer version of Dictionary"
+            "This history was created by a newer version of JDict"
         );
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         if version < 4 {
@@ -532,7 +532,7 @@ impl Database {
             attempt.completed_at = Some(now());
             attempt.failure = Some(Failure::new(
                 "interrupted",
-                "Dictionary closed before this lookup completed. You can submit it again.",
+                "JDict closed before this lookup completed. You can submit it again.",
             ));
             self.save(&attempt)?;
         }

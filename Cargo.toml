@@ -3,7 +3,7 @@ name = "dictionary"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.99"
-description = "A native English–Chinese learning dictionary with local history"
+description = "JDict, a native English–Chinese learning dictionary with local history"
 license = "MIT"
 publish = false
 
@@ -33,7 +33,7 @@ uuid = { version = "1", features = ["v4"] }
 tempfile = "3"
 
 [[bin]]
-name = "dictionary"
+name = "jdict"
 path = "src/main.rs"
 required-features = ["desktop"]
 

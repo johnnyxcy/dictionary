@@ -435,7 +435,7 @@ impl Render for HistoryView {
                         super::icon_button(
                             "back-from-history",
                             IconName::ChevronLeft,
-                            "Back to dictionary (⌘L)",
+                            "Back to lookup (⌘L)",
                         )
                         .on_click(cx.listener(|_, _, _, cx| cx.emit(HistoryEvent::Back))),
                     )

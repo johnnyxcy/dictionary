@@ -363,7 +363,7 @@ impl Coordinator {
                 Ok(()) => job.checkpoint_failed = false,
                 Err(error) => {
                     if !job.checkpoint_failed {
-                        events.send(Event::Notice(format!("Cannot save live progress: {error:#}. Keep Dictionary open until the result is saved, or copy it before closing."))).await.ok();
+                        events.send(Event::Notice(format!("Cannot save live progress: {error:#}. Keep JDict open until the result is saved, or copy it before closing."))).await.ok();
                     }
                     job.checkpoint_failed = true;
                 }
@@ -482,7 +482,7 @@ async fn work(
     mut stopping: watch::Receiver<bool>,
     catalog: Option<Catalog>,
 ) -> Result<()> {
-    let store = Store::open(paths.database.clone()).await.with_context(|| format!("Cannot open history at {}. Quit other Dictionary instances and check this folder's permissions. Existing history has not been reset.", paths.database.display()))?;
+    let store = Store::open(paths.database.clone()).await.with_context(|| format!("Cannot open history at {}. Quit other JDict instances and check this folder's permissions. Existing history has not been reset.", paths.database.display()))?;
     let mut settings = SettingsState {
         preferences: store.preferences().await?,
         catalog: store.catalog().await?,
@@ -572,7 +572,7 @@ async fn work(
                     Command::SaveSettings(preferences) => {
                         let connection_changed = settings.preferences.as_ref().and_then(|p| p.cli_path.as_ref()) != preferences.cli_path.as_ref();
                         let result = async {
-                            ensure!(preferences.version == 1, "Settings were created by a newer Dictionary version");
+                            ensure!(preferences.version == 1, "Settings were created by a newer JDict version");
                             if connection_changed && let Some(path) = &preferences.cli_path { discovery::validate_executable(path)?; }
                             // Saving a new connection starts discovery after persistence.
                             // Appearance-only changes also work with an unavailable CLI/skill.

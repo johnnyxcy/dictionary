@@ -26,7 +26,7 @@ fn main() -> anyhow::Result<()> {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             window_min_size: Some(size(px(900.), px(620.))),
             titlebar: Some(TitlebarOptions {
-                title: Some("Dictionary".into()),
+                title: Some("JDict".into()),
                 ..Default::default()
             }),
             ..Default::default()
@@ -36,13 +36,13 @@ fn main() -> anyhow::Result<()> {
                 open_window(options, cx, |window, cx| {
                     cx.new(|cx| ui::DictionaryView::new(service, events, data, window, cx))
                 })
-                .expect("Cannot open Dictionary window");
+                .expect("Cannot open JDict window");
             }
             Err(error) => {
                 open_window(options, cx, |_, cx| {
                     cx.new(|_| ui::startup::StartupError(format!("{error:#}")))
                 })
-                .expect("Cannot open Dictionary startup diagnostics");
+                .expect("Cannot open JDict startup diagnostics");
             }
         }
         cx.activate(true);

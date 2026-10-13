@@ -55,7 +55,7 @@ Inspected the registered macOS menus in a separate optimized fixture bundle. Abo
 
 The first native pass exposed reentrant window access in global menu handlers. Window work is now deferred until the action's current window update finishes. Dock commands have distinct global actions, then forward to existing view actions; they cannot recursively forward themselves when no normal view handler exists. No navigation action submits a lookup.
 
-The automation connector could not attach to macOS Dock itself, so the Dock context menu's direct click path remains a manual UI check. Its registration compiles against GPUI's native Dock API; the shared window-activation path was exercised through Window → Show Dictionary. Verify the Dock shortcuts while Dictionary is hidden/minimized and with an unsaved Settings draft.
+The automation connector could not attach to macOS Dock itself, so the Dock context menu's direct click path remains a manual UI check. Its registration compiles against GPUI's native Dock API; the shared window-activation path was exercised through Window → Show Dictionary (now Show JDict). Verify the Dock shortcuts while JDict is hidden/minimized and with an unsaved Settings draft.
 
 ## Remaining manual checks
 
@@ -69,7 +69,7 @@ System appearance was initialized from macOS and explicit Light/Dark choices wer
 To repeat native tests without touching personal history:
 
 ```sh
-python3 scripts/bundle.py --name 'Dictionary Release QA' \
+python3 scripts/bundle.py --name 'JDict Release QA' \
   --data-dir /tmp/dictionary-release-qa \
   --cli "$PWD/tests/fixtures/activity-cli.py"
 ```

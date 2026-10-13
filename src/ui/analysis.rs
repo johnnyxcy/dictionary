@@ -493,7 +493,7 @@ impl Render for AnalysisView {
             .date_naive();
         div().flex().flex_col().size_full().min_h_0().px_6().pt_5()
             .child(div().flex().items_center().gap_2().flex_shrink_0()
-                .child(super::icon_button("back-from-analysis", IconName::ChevronLeft, "Back to dictionary (⌘L)")
+                .child(super::icon_button("back-from-analysis", IconName::ChevronLeft, "Back to lookup (⌘L)")
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(AnalysisEvent::Back))))
                 .child(div().flex_1().text_2xl().font_weight(FontWeight::SEMIBOLD).child("Analysis"))
                 .child(Button::new("analysis-data-view").small().ghost().icon(if self.show_data { IconName::ChartColumn } else { IconName::List }).label(if self.show_data { "Charts" } else { "Data" }).accessibility_label(if self.show_data { "Show analysis charts" } else { "Show chart data as text" }).selected(self.show_data)

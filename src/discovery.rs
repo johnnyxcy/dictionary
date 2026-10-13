@@ -29,6 +29,7 @@ impl AppPaths {
     pub fn discover() -> Result<Self> {
         let data = match std::env::var_os("DICTIONARY_DATA_DIR") {
             Some(path) => PathBuf::from(path),
+            // Keep the original directory so the JDict rename preserves history and settings.
             None => dirs::data_dir()
                 .context("Cannot locate Application Support")?
                 .join("Dictionary"),
@@ -197,7 +198,7 @@ async fn discover_inner(workspace: PathBuf, configured: Option<PathBuf>) -> Resu
         sequence: 0,
     };
     let result = async {
-        rpc.call("initialize", json!({"clientInfo":{"name":"dictionary","title":"Dictionary","version":env!("CARGO_PKG_VERSION")}})).await?;
+        rpc.call("initialize", json!({"clientInfo":{"name":"dictionary","title":"JDict","version":env!("CARGO_PKG_VERSION")}})).await?;
         rpc.input.write_all(b"{\"method\":\"initialized\"}\n").await?;
         rpc.input.flush().await?;
         let config = rpc.call("config/read", json!({"includeLayers":false})).await?;

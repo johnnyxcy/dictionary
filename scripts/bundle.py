@@ -26,10 +26,10 @@ def main(default_profile="release"):
     args = parser.parse_args()
     if sys.platform != "darwin":
         parser.error("Application bundles must be built on macOS")
-    name = args.name or ("Dictionary" if args.profile == "release" else "Dictionary Dev")
+    name = args.name or ("JDict" if args.profile == "release" else "JDict Dev")
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 -]*", name):
         parser.error("App names must contain only letters, numbers, spaces, and hyphens")
-    if (args.data_dir or args.cli) and name == "Dictionary":
+    if (args.data_dir or args.cli) and name == "JDict":
         parser.error("Use a distinct --name when packaging a development profile")
 
     root = Path(__file__).resolve().parent.parent
@@ -40,7 +40,7 @@ def main(default_profile="release"):
     if not args.skip_build:
         environment = dict(os.environ, MACOSX_DEPLOYMENT_TARGET="15.0")
         run("cargo", "build", "--locked", "--profile", args.profile, cwd=root, env=environment)
-    executable = target / ("debug" if args.profile == "dev" else "release") / "dictionary"
+    executable = target / ("debug" if args.profile == "dev" else "release") / "jdict"
     if not executable.is_file():
         parser.error(f"Build not found: {executable}")
     linked = run("/usr/bin/otool", "-L", str(executable), capture_output=True, text=True).stdout
@@ -51,20 +51,21 @@ def main(default_profile="release"):
 
     target.mkdir(parents=True, exist_ok=True)
     bundle = target / f"{name}.app"
-    with tempfile.TemporaryDirectory(prefix="dictionary-bundle-", dir=target) as staging:
+    with tempfile.TemporaryDirectory(prefix="jdict-bundle-", dir=target) as staging:
         built = Path(staging) / bundle.name
         contents = built / "Contents"
         macos = contents / "MacOS"
         resources = contents / "Resources"
         macos.mkdir(parents=True)
         resources.mkdir()
-        shutil.copy2(executable, macos / "dictionary")
+        shutil.copy2(executable, macos / "jdict")
         shutil.copy2(root / "LICENSE", resources / "LICENSE.txt")
         info = {
-            "CFBundleIdentifier": "com.johnnyxcy.dictionary" + ("" if name == "Dictionary" else ".dev." + name.lower().replace(" ", "-")),
+            # Preserve the app's identity across the rename for existing installations.
+            "CFBundleIdentifier": "com.johnnyxcy.dictionary" + ("" if name == "JDict" else ".dev." + name.lower().replace(" ", "-")),
             "CFBundleName": name,
             "CFBundleDisplayName": name,
-            "CFBundleExecutable": "dictionary",
+            "CFBundleExecutable": "jdict",
             "CFBundlePackageType": "APPL",
             "CFBundleVersion": package["version"],
             "CFBundleShortVersionString": package["version"],

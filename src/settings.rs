@@ -115,7 +115,7 @@ impl Preferences {
     pub fn setup(&self, catalog: &Catalog) -> Result<Setup> {
         ensure!(
             self.version == 1,
-            "Settings were created by a newer Dictionary version"
+            "Settings were created by a newer JDict version"
         );
         // A catalog from another executable cannot validate this connection.
         // Development overrides intentionally take precedence over saved paths.

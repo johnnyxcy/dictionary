@@ -653,7 +653,7 @@ impl DictionaryView {
                                     .small()
                                     .text_color(theme.muted_foreground),
                             )
-                            .child(div().font_weight(FontWeight::SEMIBOLD).child("Dictionary")),
+                            .child(div().font_weight(FontWeight::SEMIBOLD).child("JDict")),
                     )
                     .child(self.new_lookup_button(cx)),
             )
