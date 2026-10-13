@@ -190,43 +190,31 @@ impl Database {
         let lock = HistoryLock(lock);
         let mut connection = Connection::open(path).context("Cannot open dictionary history")?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
-        connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(
             version <= 4,
             "This history was created by a newer version of Dictionary"
         );
-        if version == 0 {
-            let tx = connection.transaction()?;
-            tx.execute_batch(include_str!("../migrations/001_initial.sql"))?;
-            tx.commit()?;
-        }
-        if version < 2 {
-            let tx = connection.transaction()?;
-            tx.execute_batch(include_str!("../migrations/002_lookup_cache.sql"))?;
-            let lookups = {
-                let mut statement = tx.prepare("SELECT id, input FROM lookups")?;
-                statement
-                    .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
-                    .collect::<rusqlite::Result<Vec<_>>>()?
-            };
-            for (id, input) in lookups {
-                tx.execute(
-                    "UPDATE lookups SET cache_key=?2 WHERE id=?1",
-                    params![id, lookup_key(&input)],
-                )?;
-            }
-            tx.commit()?;
-        }
-        if version < 3 {
-            let tx = connection.transaction()?;
-            tx.execute_batch(include_str!("../migrations/003_settings.sql"))?;
-            tx.commit()?;
-        }
+        connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         if version < 4 {
-            let tx = connection.transaction()?;
-            tx.execute_batch(include_str!("../migrations/004_history.sql"))?;
-            tx.commit()?;
+            let has_data: bool = connection.query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table')",
+                [],
+                |r| r.get(0),
+            )?;
+            let backup = has_data.then(|| {
+                path.with_extension(format!("pre-v{version}-{}.sqlite3", uuid::Uuid::new_v4()))
+            });
+            if let Some(backup) = &backup {
+                // SQLite copies a consistent snapshot, including committed WAL
+                // contents. A file copy could silently omit the latest history.
+                connection.execute("VACUUM INTO ?1", [backup.to_str().context("Backup path must be valid UTF-8")?])
+                    .with_context(|| format!("Cannot back up history to {}. The upgrade was not started; free disk space and check folder permissions.", backup.display()))?;
+            }
+            migrate(&mut connection, version).with_context(|| match &backup {
+                Some(backup) => format!("History upgrade failed and was rolled back. A recovery copy is at {}. Keep the original database and this backup before retrying.", backup.display()),
+                None => "Cannot create dictionary history; initialization was rolled back".into(),
+            })?;
         }
         let mut db = Self {
             connection,
@@ -550,6 +538,38 @@ impl Database {
         }
         Ok(())
     }
+}
+
+fn migrate(connection: &mut Connection, version: i64) -> Result<()> {
+    // All pending versions succeed together; a later failure cannot strand an
+    // existing installation halfway through an upgrade.
+    let tx = connection.transaction()?;
+    if version == 0 {
+        tx.execute_batch(include_str!("../migrations/001_initial.sql"))?;
+    }
+    if version < 2 {
+        tx.execute_batch(include_str!("../migrations/002_lookup_cache.sql"))?;
+        let lookups = {
+            let mut statement = tx.prepare("SELECT id, input FROM lookups")?;
+            statement
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (id, input) in lookups {
+            tx.execute(
+                "UPDATE lookups SET cache_key=?2 WHERE id=?1",
+                params![id, lookup_key(&input)],
+            )?;
+        }
+    }
+    if version < 3 {
+        tx.execute_batch(include_str!("../migrations/003_settings.sql"))?;
+    }
+    if version < 4 {
+        tx.execute_batch(include_str!("../migrations/004_history.sql"))?;
+    }
+    tx.commit()?;
+    Ok(())
 }
 
 #[cfg(test)]

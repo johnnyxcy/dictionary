@@ -49,7 +49,7 @@ Searching an expression first opens its running or queued attempt when one exist
 
 Each newly generated lookup has fresh model context. Previously viewed history is never silently appended to a new request. The first version allows three concurrent CLI processes and persists additional requests in a FIFO queue. Look up always submits the current input; active and queued keys are reserved before admitting another request, so repeated clicks reuse one attempt. Regenerate bypasses saved cache but shares this active-key guard. Stop beside the selected entry’s status cancels only that attempt. Queued cancellation never starts a process. Switching views or choosing New Lookup does not cancel work, and background events never navigate away from the selected entry. Each attempt owns its output, activity, cancellation, usage, and timing. Request IDs discard stale navigation responses.
 
-Use Enter to submit and Shift+Enter to insert a newline; Command+Enter remains a submission shortcut. Use Command+L to return to Dictionary and focus its input, Command+F to open History, Command+Shift+A to open Analysis, Command+B to toggle the sidebar, and Command+, for Settings. Respect Chinese IME composition before handling submission keys. Keep result text selectable and support copying the entry as Markdown.
+Use Enter to submit and Shift+Enter to insert a newline; Command+Enter remains a submission shortcut. Use Command+N for New Lookup, Command+L to return to Dictionary and focus its input, Command+F to open History, Command+Shift+A to open Analysis, Command+B to toggle the sidebar, and Command+, for Settings. Respect Chinese IME composition before handling submission keys. Keep result text selectable and support copying the entry as Markdown.
 
 Auto direction uses a local script heuristic and exposes the resolved direction before submission. Ambiguous or mixed input requires a direction choice. Preserve the original input, including punctuation and line breaks.
 
@@ -243,16 +243,20 @@ Validation evidence: [Phase 4 validation](../docs/phase-4-validation.md).
 
 Make the complete app usable from a normal macOS launch: package a local application bundle, finish input and keyboard behavior, validate themes and accessibility, and provide actionable CLI/skill setup diagnostics. Keep storage and executable discovery independent of a terminal's startup environment.
 
+The local release builder creates an optimized, ad-hoc-signed `Dictionary.app`, verifies system-only dynamic dependencies, and generates its icon. Settings persists the CLI location and System/Light/Dark appearance; changing the executable reconnects metadata discovery without changing already admitted work. Native menus expose navigation and editing. Analysis offers labeled text alternatives to its charts. Startup failures display recovery diagnostics, and existing-schema upgrades require a consistent backup before all pending migrations run in a single transaction.
+
 ### Acceptance criteria
 
-- [ ] The app launches from Finder, locates a configured CLI even when shell PATH differs, and reuses CLI login through the CLI.
+- [x] The app launches through macOS Launch Services without Terminal setup and locates a saved CLI with a minimal PATH, including an adjacent runtime and symlink. Existing CLI authentication reuse is retained from the real Phase 1–2 acceptance runs.
 - [ ] Chinese IME composition, multiline paste, IPA, selection/copy, keyboard navigation, and narrow-window layouts work.
-- [ ] Light/dark themes, labels, focus order, and chart alternatives remain readable and usable.
-- [ ] Existing history and preferences survive upgrade and migration; migration failure preserves recoverable data.
-- [ ] Closing with an active lookup reaps owned processes and leaves a consistent saved state.
-- [ ] A macOS acceptance pass covers lookup, reverse lookup, model/effort changes, cancellation, history, deletion, and charts from the packaged app.
+- [x] Light/dark themes, native accessibility labels, visible keyboard focus, and labeled chart alternatives have been inspected in the packaged app.
+- [x] Existing history and preferences survive upgrade and migration; migration failure preserves recoverable data.
+- [x] Closing with active lookups reaps owned processes and leaves a consistent saved state, including queued cancellations without spawning.
+- [x] A fixture-backed macOS acceptance pass covers lookup, reverse-direction submission, model/effort changes, cancellation, history, deletion, and charts from packaged builds. Real bilingual output was reviewed in Phases 1–2.
 
-The first packaging target is a local macOS application. Signed/notarized public distribution, automatic updates, and architecture-specific release matrices require separate release requirements.
+Multiline input, Chinese/IPA rendering, selection/copy, keyboard navigation, and the 900 × 620 minimum window were verified. Native Chinese IME candidate confirmation and a full VoiceOver reading pass remain manual checks; Unicode paste and accessibility-tree inspection are not substitutes for them. Evidence and reproduction steps: [Phase 5 validation](../docs/phase-5-validation.md).
+
+The first packaging target is a local macOS application. Developer ID signing/notarized public distribution, automatic updates, and architecture-specific release matrices require separate release requirements.
 
 ## Scope after these phases
 

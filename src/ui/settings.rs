@@ -1,11 +1,12 @@
 use std::path::PathBuf;
 
-use dictionary::settings::{EFFORTS, Preferences, SettingsState};
+use dictionary::settings::{Appearance, EFFORTS, Preferences, SettingsState};
 use gpui_kit::{
     assets::IconName,
     component::{
         ActiveTheme, Disableable, Icon, Selectable, Sizable, WindowExt,
         button::{Button, ButtonVariant, ButtonVariants},
+        input::{Input, InputEvent, InputState},
         select::{SearchableVec, Select, SelectEvent, SelectItem, SelectState},
         switch::Switch,
     },
@@ -40,6 +41,7 @@ pub struct SettingsView {
     baseline: Preferences,
     models: Entity<SelectState<SearchableVec<PickerItem<String>>>>,
     skills: Entity<SelectState<Vec<PickerItem<PathBuf>>>>,
+    cli_path: Entity<InputState>,
     saving: bool,
     confirming_discard: bool,
     refreshing: bool,
@@ -61,6 +63,8 @@ impl SettingsView {
             effort: String::new(),
             fast_mode: false,
             skill_path: PathBuf::new(),
+            cli_path: None,
+            appearance: Appearance::System,
         });
         let models = cx.new(|cx| {
             SelectState::new(
@@ -73,7 +77,27 @@ impl SettingsView {
         });
         let skills =
             cx.new(|cx| SelectState::new(Vec::<PickerItem<PathBuf>>::new(), None, window, cx));
+        let cli_path = cx.new(|cx| InputState::new(window, cx).placeholder("Automatic discovery"));
+        cli_path.update(cx, |input, cx| {
+            input.set_value(
+                draft
+                    .cli_path
+                    .as_ref()
+                    .map(|p| p.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                window,
+                cx,
+            )
+        });
         let subscriptions = vec![
+            cx.subscribe_in(&cli_path, window, |this: &mut Self, input, event, _, cx| {
+                if matches!(event, InputEvent::Change) {
+                    let value = input.read(cx).value();
+                    this.draft.cli_path =
+                        (!value.trim().is_empty()).then(|| PathBuf::from(value.trim()));
+                    this.changed(cx);
+                }
+            }),
             cx.subscribe_in(&models, window, |this: &mut Self, _, event, _, cx| {
                 if let SelectEvent::Confirm(Some(value)) = event {
                     this.draft.model = value.clone();
@@ -103,6 +127,7 @@ impl SettingsView {
             draft,
             models,
             skills,
+            cli_path,
             saving: false,
             confirming_discard: false,
             refreshing,
@@ -121,6 +146,12 @@ impl SettingsView {
     }
 
     fn is_valid(&self) -> bool {
+        if self.draft.cli_path != self.baseline.cli_path {
+            return true;
+        }
+        if self.state.preferences.is_some() && self.draft.same_generation_settings(&self.baseline) {
+            return true;
+        }
         self.state
             .catalog
             .as_ref()
@@ -239,6 +270,17 @@ impl SettingsView {
         if let Some(preferences) = &state.preferences {
             if !self.has_unsaved_changes() {
                 self.draft = preferences.clone();
+                self.cli_path.update(cx, |input, cx| {
+                    input.set_value(
+                        preferences
+                            .cli_path
+                            .as_ref()
+                            .map(|p| p.to_string_lossy().into_owned())
+                            .unwrap_or_default(),
+                        window,
+                        cx,
+                    )
+                });
             }
             self.baseline = preferences.clone();
         }
@@ -284,6 +326,56 @@ impl SettingsView {
         })
         .detach();
     }
+
+    fn browse_cli(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let paths = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: false,
+            prompt: Some("Choose the Codex executable".into()),
+        });
+        cx.spawn_in(window, async move |view, cx| {
+            if let Ok(Ok(Some(paths))) = paths.await
+                && let Some(path) = paths.into_iter().next()
+            {
+                view.update_in(cx, |this, window, cx| {
+                    this.cli_path.update(cx, |input, cx| {
+                        input.set_value(path.to_string_lossy().into_owned(), window, cx)
+                    });
+                    this.draft.cli_path = Some(path);
+                    this.changed(cx);
+                })
+                .ok();
+            }
+        })
+        .detach();
+    }
+
+    pub fn footer(&self, cx: &Context<Self>) -> Div {
+        div()
+            .flex()
+            .justify_end()
+            .gap_2()
+            .pt_2()
+            .child(
+                Button::new("cancel-settings")
+                    .label("Cancel")
+                    .disabled(self.saving)
+                    .on_click(cx.listener(|this, _, window, cx| {
+                        if this.request_cancel(window, cx) {
+                            window.close_dialog(cx);
+                        }
+                    })),
+            )
+            .child(
+                Button::new("save-settings")
+                    .primary()
+                    .icon(IconName::Check)
+                    .label(if self.saving { "Saving…" } else { "Save" })
+                    .disabled(!self.is_valid() || self.saving)
+                    .on_click(cx.listener(|this, _, _, cx| this.save(cx))),
+            )
+    }
 }
 
 impl Render for SettingsView {
@@ -294,7 +386,6 @@ impl Render for SettingsView {
             .catalog
             .as_ref()
             .and_then(|c| c.models.iter().find(|m| m.model == self.draft.model));
-        let valid = self.is_valid();
         let supports_fast = model.is_some_and(|m| m.supports_fast);
         let catalog_status = self
             .state
@@ -315,6 +406,12 @@ impl Render for SettingsView {
             .unwrap_or_else(|| "Model catalog unavailable".into());
         div().flex().flex_col().gap_4().w_full()
             .child(div().text_sm().text_color(theme.muted_foreground).child("Choose how new entries are generated. Running and saved entries keep their original settings."))
+            .child(div().flex().flex_col().gap_2()
+                .child(field_label(IconName::Monitor, "Appearance"))
+                .child(div().flex().gap_2().children([(Appearance::System, "System"), (Appearance::Light, "Light"), (Appearance::Dark, "Dark")].map(|(appearance, label)| {
+                    Button::new(label).label(label).flex_1().selected(self.draft.appearance == appearance).disabled(self.saving)
+                        .on_click(cx.listener(move |this, _, _, cx| { this.draft.appearance = appearance; this.changed(cx); }))
+                }))))
             .child(div().flex().flex_col().gap_2()
                 .child(field_label(IconName::Cpu, "Model"))
                 .child(div().w_full().h(px(34.)).child(Select::new(&self.models).w_full().placeholder("Choose a model").accessibility_label("Model").disabled(self.saving))))
@@ -348,20 +445,17 @@ impl Render for SettingsView {
                     .child(Button::new("choose-skill").icon(IconName::FolderOpen).label("Browse…").disabled(self.saving).on_click(cx.listener(|this, _, window, cx| this.browse_skill(window, cx)))))
                 .child(div().text_xs().text_color(theme.muted_foreground).child("Each lookup saves a copy of the selected skill for its entry.")))
             .child(div().flex().flex_col().gap_2().pt_3().border_t_1().border_color(theme.border)
+                .child(field_label(IconName::Terminal, "CLI location"))
+                .child(div().flex().items_center().gap_2()
+                    .child(div().flex_1().min_w_0().child(Input::new(&self.cli_path).aria_label("CLI executable path").disabled(self.saving)))
+                    .child(Button::new("choose-cli").icon(IconName::FolderOpen).label("Browse…").accessibility_label("Browse for CLI executable").disabled(self.saving).on_click(cx.listener(|this, _, window, cx| this.browse_cli(window, cx)))))
+                .child(div().text_xs().text_color(theme.muted_foreground).child("Paste the absolute path from command -v codex in Terminal, or leave blank for automatic discovery. Save connects using this location."))
+                .child(div().text_xs().text_color(theme.muted_foreground).child("Authentication uses your existing CLI login. If needed, run codex login in Terminal, then Refresh."))
                 .child(div().flex().items_center().justify_between().gap_2()
                     .child(div().text_xs().text_color(theme.muted_foreground).child(catalog_status))
-                    .child(Button::new("refresh-catalog").small().ghost().icon(IconName::RefreshCw).label(if self.refreshing { "Refreshing…" } else { "Refresh" }).disabled(self.refreshing || self.saving).on_click(cx.listener(|this, _, _, cx| { this.refreshing = true; cx.emit(SettingsEvent::Refresh); cx.notify(); }))))
+                    .child(Button::new("refresh-catalog").small().ghost().icon(IconName::RefreshCw).label(if self.refreshing { "Refreshing…" } else { "Refresh" }).disabled(self.refreshing || self.saving || self.draft.cli_path != self.baseline.cli_path).on_click(cx.listener(|this, _, _, cx| { this.refreshing = true; cx.emit(SettingsEvent::Refresh); cx.notify(); }))))
                 .when_some(self.state.catalog.as_ref(), |this, c| this.child(div().text_xs().text_color(theme.muted_foreground).child(format!("CLI: {}", c.executable.display()))))
                 .when_some(self.state.diagnostic.clone(), |this, text| this.child(super::message_box(text, theme.danger, theme.border))))
-            .child(div().flex().justify_end().gap_2().pt_2()
-                .child(Button::new("cancel-settings").label("Cancel").disabled(self.saving)
-                    .on_click(cx.listener(|this, _, window, cx| {
-                        if this.request_cancel(window, cx) {
-                            window.close_dialog(cx);
-                        }
-                    })))
-                .child(Button::new("save-settings").primary().icon(IconName::Check).label(if self.saving { "Saving…" } else { "Save" }).disabled(!valid || self.saving)
-                    .on_click(cx.listener(|this, _, _, cx| this.save(cx)))))
     }
 }
 

@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, ensure};
 use async_channel::{Receiver, Sender};
 use tokio::{
     sync::watch,
@@ -482,7 +482,7 @@ async fn work(
     mut stopping: watch::Receiver<bool>,
     catalog: Option<Catalog>,
 ) -> Result<()> {
-    let store = Store::open(paths.database).await?;
+    let store = Store::open(paths.database.clone()).await.with_context(|| format!("Cannot open history at {}. Quit other Dictionary instances and check this folder's permissions. Existing history has not been reset.", paths.database.display()))?;
     let mut settings = SettingsState {
         preferences: store.preferences().await?,
         catalog: store.catalog().await?,
@@ -497,6 +497,10 @@ async fn work(
     } else {
         Some(tokio::spawn(discovery::discover_catalog(
             paths.workspace.clone(),
+            settings
+                .preferences
+                .as_ref()
+                .and_then(|p| p.cli_path.clone()),
         )))
     };
     let mut setup = if settings.catalog.is_some() {
@@ -561,26 +565,41 @@ async fn work(
                     Command::Reconnect => {
                         if discovery_task.is_none() {
                             events.send(Event::Connecting).await.ok();
-                            discovery_task = Some(tokio::spawn(discovery::discover_catalog(paths.workspace.clone())));
+                            discovery_task = Some(tokio::spawn(discovery::discover_catalog(paths.workspace.clone(), settings.preferences.as_ref().and_then(|p| p.cli_path.clone()))));
                         }
                         continue;
                     }
                     Command::SaveSettings(preferences) => {
+                        let connection_changed = settings.preferences.as_ref().and_then(|p| p.cli_path.as_ref()) != preferences.cli_path.as_ref();
                         let result = async {
-                            let catalog = settings.catalog.as_ref().context("Refresh the model catalog before saving Settings")?;
-                            let chosen = preferences.setup(catalog)?;
-                            SkillSnapshot::read(&chosen).context("Cannot read the chosen dictionary skill")?;
+                            ensure!(preferences.version == 1, "Settings were created by a newer Dictionary version");
+                            if connection_changed && let Some(path) = &preferences.cli_path { discovery::validate_executable(path)?; }
+                            // Saving a new connection starts discovery after persistence.
+                            // Appearance-only changes also work with an unavailable CLI/skill.
+                            let generation_changed = settings.preferences.as_ref().is_none_or(|old| !preferences.same_generation_settings(old));
+                            if !connection_changed && generation_changed {
+                                let catalog = settings.catalog.as_ref().context("Choose a CLI location and save it to load the model catalog")?;
+                                let chosen = preferences.setup(catalog)?;
+                                SkillSnapshot::read(&chosen).context("Cannot read the chosen dictionary skill")?;
+                            }
                             coordinator.store.save_preferences(preferences.clone()).await?;
-                            Ok::<_, anyhow::Error>(chosen)
+                            Ok::<_, anyhow::Error>(())
                         }.await;
                         match result {
-                            Ok(chosen) => {
+                            Ok(()) => {
                                 settings.preferences = Some(preferences);
                                 if !settings.cached { settings.diagnostic = None; }
-                                setup = Some(chosen.clone());
-                                events.send(Event::Ready(chosen)).await.ok();
-                                events.send(Event::Settings(Box::new(settings.clone()))).await.ok();
+                                setup = publish_settings(&settings, &events).await;
                                 events.send(Event::SettingsSaved).await.ok();
+                                if connection_changed {
+                                    setup = None;
+                                    if let Some(task) = discovery_task.take() {
+                                        task.abort();
+                                        let _ = task.await;
+                                    }
+                                    events.send(Event::Connecting).await.ok();
+                                    discovery_task = Some(tokio::spawn(discovery::discover_catalog(paths.workspace.clone(), settings.preferences.as_ref().and_then(|p| p.cli_path.clone()))));
+                                }
                             }
                             Err(error) => { events.send(Event::SettingsFailed(format!("{error:#}"))).await.ok(); }
                         }
@@ -632,8 +651,14 @@ async fn install_catalog(
     store: &Store,
 ) -> Result<()> {
     store.save_catalog(catalog.clone()).await?;
-    if settings.preferences.is_none() {
-        let preferences = Preferences::initial(&catalog);
+    if settings.preferences.as_ref().is_none_or(|p| {
+        p.model.is_empty() && p.effort.is_empty() && p.skill_path.as_os_str().is_empty()
+    }) {
+        let mut preferences = Preferences::initial(&catalog);
+        if let Some(saved) = &settings.preferences {
+            preferences.cli_path = saved.cli_path.clone();
+            preferences.appearance = saved.appearance;
+        }
         store.save_preferences(preferences.clone()).await?;
         settings.preferences = Some(preferences);
     }

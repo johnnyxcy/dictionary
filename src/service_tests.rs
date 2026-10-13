@@ -809,6 +809,94 @@ async fn unsupported_settings_are_rejected_without_replacing_saved_preferences()
 }
 
 #[tokio::test]
+async fn changing_cli_connects_the_saved_path_without_changing_an_active_attempt() {
+    let mut h = Harness::new();
+    h.lookup(1, "keep old connection");
+    let old = h.opened(1).await;
+    h.streaming(&old.id).await;
+    let mut preferences = h
+        .seen
+        .iter()
+        .find_map(|event| match event {
+            Event::Settings(state) => state.preferences.clone(),
+            _ => None,
+        })
+        .unwrap();
+    let new_cli = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/activity-cli.py");
+    preferences.cli_path = Some(new_cli.clone());
+    h.send(Command::SaveSettings(preferences.clone()));
+    h.until(|events| {
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Ready(setup) if setup.executable == new_cli))
+    })
+    .await;
+    h.lookup(2, "use saved connection");
+    let new = h.opened(2).await;
+    assert_eq!(new.setup.executable, new_cli);
+    assert_ne!(old.setup.executable, new.setup.executable);
+    h.send(Command::Cancel(new.id.clone()));
+    assert_eq!(h.finished(&new.id).await.status, AttemptStatus::Cancelled);
+    h.release(&old.input);
+    let finished = h.finished(&old.id).await;
+    assert_eq!(finished.status, AttemptStatus::Succeeded);
+    assert_eq!(finished.setup.executable, old.setup.executable);
+    drop(h.service.take());
+    assert_eq!(
+        crate::store::Database::open(&h.paths.database)
+            .unwrap()
+            .read_state::<Preferences>("preferences")
+            .unwrap(),
+        Some(preferences)
+    );
+}
+
+#[tokio::test]
+async fn appearance_can_be_saved_with_an_unavailable_skill_and_bad_cli_paths_are_rejected() {
+    let mut h = Harness::new();
+    h.until(|events| events.iter().any(|e| matches!(e, Event::Ready(_))))
+        .await;
+    let mut state = h
+        .seen
+        .iter()
+        .find_map(|event| match event {
+            Event::Settings(state) => Some(*state.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let mut preferences = state.preferences.take().unwrap();
+    preferences.skill_path = h.paths.data.join("missing-skill.md");
+    drop(h.service.take());
+    crate::store::Database::open(&h.paths.database)
+        .unwrap()
+        .write_state("preferences", &preferences)
+        .unwrap();
+    let (service, events) = Service::start_inner(h.paths.clone(), state.catalog).unwrap();
+    h.service = Some(service);
+    h.events = events;
+    h.seen.clear();
+    h.until(|events| events.iter().any(|e| matches!(e, Event::SetupFailed(_))))
+        .await;
+    preferences.appearance = crate::settings::Appearance::Dark;
+    h.send(Command::SaveSettings(preferences.clone()));
+    h.until(|events| events.iter().any(|e| matches!(e, Event::SettingsSaved)))
+        .await;
+    let mut invalid = preferences.clone();
+    invalid.cli_path = Some("relative-cli".into());
+    h.send(Command::SaveSettings(invalid));
+    h.until(|events| events.iter().any(|e| matches!(e, Event::SettingsFailed(_))))
+        .await;
+    drop(h.service.take());
+    assert_eq!(
+        crate::store::Database::open(&h.paths.database)
+            .unwrap()
+            .read_state::<Preferences>("preferences")
+            .unwrap(),
+        Some(preferences)
+    );
+}
+
+#[tokio::test]
 async fn missing_discovered_skill_can_be_repaired_without_losing_the_model_catalog() {
     let mut h = Harness::new();
     h.until(|events| events.iter().any(|e| matches!(e, Event::Ready(_))))

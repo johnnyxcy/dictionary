@@ -42,6 +42,7 @@ pub struct AnalysisView {
     direction: Picker<Option<Direction>>,
     outcome: Picker<Option<AttemptStatus>>,
     frequency_attempts: bool,
+    show_data: bool,
     scroll: ScrollHandle,
     visible: bool,
     _subscriptions: Vec<Subscription>,
@@ -156,6 +157,7 @@ impl AnalysisView {
             direction,
             outcome,
             frequency_attempts: true,
+            show_data: false,
             scroll: ScrollHandle::new(),
             visible: false,
             _subscriptions: subscriptions,
@@ -299,6 +301,7 @@ impl AnalysisView {
     }
 
     fn dashboard(&self, report: &AnalysisReport, cx: &Context<Self>) -> AnyElement {
+        let chart = |id, data| chart(id, data, self.show_data);
         let theme = cx.theme();
         let summary = &report.summary;
         let population = status_label(&report.query.latency_status());
@@ -493,6 +496,8 @@ impl Render for AnalysisView {
                 .child(super::icon_button("back-from-analysis", IconName::ChevronLeft, "Back to dictionary (⌘L)")
                     .on_click(cx.listener(|_, _, _, cx| cx.emit(AnalysisEvent::Back))))
                 .child(div().flex_1().text_2xl().font_weight(FontWeight::SEMIBOLD).child("Analysis"))
+                .child(Button::new("analysis-data-view").small().ghost().icon(if self.show_data { IconName::ChartColumn } else { IconName::List }).label(if self.show_data { "Charts" } else { "Data" }).accessibility_label(if self.show_data { "Show analysis charts" } else { "Show chart data as text" }).selected(self.show_data)
+                    .on_click(cx.listener(|this, _, _, cx| { this.show_data = !this.show_data; cx.notify(); })))
                 .when(self.state.loading, |s| s.child(Spinner::new().small()))
                 .child(super::icon_button("refresh-analysis", IconName::RefreshCw, "Refresh analysis").disabled(self.state.loading)
                     .on_click(cx.listener(|this, _, _, cx| this.refresh(cx)))))
@@ -682,7 +687,31 @@ struct ChartPoint {
     color: Hsla,
 }
 
-fn chart(id: &'static str, data: Vec<ChartPoint>) -> Div {
+fn chart(id: &'static str, data: Vec<ChartPoint>, show_data: bool) -> Div {
+    if show_data {
+        return div().child(
+            div()
+                .id(id)
+                .role(Role::List)
+                .aria_label(id.replace('-', " "))
+                .flex()
+                .flex_col()
+                .mt_3()
+                .text_sm()
+                .children(data.into_iter().enumerate().map(|(i, point)| {
+                    div()
+                        .id((id, i))
+                        .role(Role::ListItem)
+                        .aria_label(format!("{}: {}", point.label, point.detail))
+                        .flex()
+                        .items_start()
+                        .gap_3()
+                        .py_2()
+                        .child(div().w(px(100.)).flex_shrink_0().child(point.label))
+                        .child(div().flex_1().min_w_0().child(point.detail))
+                })),
+        );
+    }
     if data.iter().all(|point| point.value.is_none()) {
         return div()
             .h(px(185.))

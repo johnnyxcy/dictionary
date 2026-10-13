@@ -284,6 +284,7 @@ impl HistoryView {
             .group("saved-attempt-row")
             .role(Role::Button)
             .tab_index(0)
+            .focus_visible(|style| style.bg(theme.accent).border_2().border_color(theme.ring))
             .aria_label(format!(
                 "Open {} · version {} · {}",
                 entry.input,
