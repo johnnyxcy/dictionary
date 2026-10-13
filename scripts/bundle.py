@@ -59,6 +59,7 @@ def main(default_profile="release"):
         macos.mkdir(parents=True)
         resources.mkdir()
         shutil.copy2(executable, macos / "dictionary")
+        shutil.copy2(root / "LICENSE", resources / "LICENSE.txt")
         info = {
             "CFBundleIdentifier": "com.johnnyxcy.dictionary" + ("" if name == "Dictionary" else ".dev." + name.lower().replace(" ", "-")),
             "CFBundleName": name,

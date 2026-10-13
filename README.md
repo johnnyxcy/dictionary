@@ -24,7 +24,7 @@ python3 scripts/bundle.py
 open 'target/Dictionary.app'
 ```
 
-You can move `Dictionary.app` to Applications. The bundle targets macOS 15 or later on the build machine's architecture, includes its icon, and uses local ad-hoc signing without a certificate. Packaging verifies the signature and rejects non-system dynamic libraries. Rust and Xcode are build requirements; using the bundle requires the CLI, its runtime (if applicable), and your dictionary skill. Public Developer ID signing, notarization, universal builds, and automatic updates are outside this local release.
+You can move `Dictionary.app` to Applications. The bundle targets macOS 15 or later on the build machine's architecture, includes its icon and MIT license, and uses ad-hoc signing without a certificate. Packaging verifies the signature and rejects non-system dynamic libraries. Rust and Xcode are build requirements; using the bundle requires the CLI, its runtime (if applicable), and your dictionary skill. Bundles are not signed with a Developer ID certificate or notarized by Apple.
 
 The macOS menu bar registers **Dictionary**, **File**, **Edit**, **View**, and **Window** menus, including About, Settings, Services, standard editing commands, navigation, hiding, minimizing, and closing. Right-click the running app's Dock icon for **Show Dictionary**, **New Lookup**, **History**, **Analysis**, and **Settings…**. Dock navigation brings the existing window forward; an open settings draft stays in place until resolved. Clicking the Dock icon also raises the existing window. Closing the last window or choosing Quit retains the same cancellation and save behavior.
 
@@ -52,6 +52,29 @@ open 'target/Dictionary Dev.app'
 ```
 
 Use `--skip-build` to package an existing build. Both entry points use the same bundle validation.
+
+## Releases
+
+[GitHub Releases](https://github.com/johnnyxcy/dictionary/releases) provides Apple Silicon downloads for macOS 15 or later: `Dictionary-<version>-macos-arm64.zip` and its `.sha256` checksum. Extract the ZIP and move `Dictionary.app` to Applications. The CLI and dictionary skill requirements above still apply.
+
+The [release workflow](.github/workflows/release.yml) automatically publishes when a version tag is pushed. The tag must exactly match the package version in `Cargo.toml`, prefixed with `v`. It checks formatting, lint, and tests, then builds the optimized app and verifies its arm64 architecture and signature after extracting the ZIP. Publishing runs only after these checks pass, with generated release notes; tags with a prerelease version are marked as prereleases. A manual workflow run builds downloadable Actions artifacts without publishing a release. It uses the repository's built-in token and needs no additional secrets.
+
+To release, first merge the desired changes and version update, then tag that commit. For version `0.1.0`:
+
+```sh
+git tag -a v0.1.0 -m "Release v0.1.0"
+git push origin v0.1.0
+```
+
+Build and verify the same assets locally on Apple Silicon with:
+
+```sh
+python3 scripts/release.py --tag v0.1.0
+cd target/release-assets
+shasum -a 256 -c Dictionary-0.1.0-macos-arm64.zip.sha256
+```
+
+Omit `--tag` for a local build without tag validation, or use `--check-only --tag v0.1.0` to check the host and version without building. Published assets are not overwritten when a workflow is rerun for an existing release.
 
 ## Searchable History
 
@@ -183,3 +206,7 @@ python3 scripts/bundle-dev.py --data-dir /tmp/dictionary-ui-test
 Use a distinct `--name` for each test profile, because macOS can cache a bundle's launch environment. The [synthetic CLI fixture](tests/fixtures/README.md) supports checking streaming and failure states without a model request.
 
 If a personal Cargo configuration redirects crates.io to an unavailable mirror, use a separate Cargo home and run Cargo from outside that configuration's ancestor directories with `--manifest-path /absolute/path/to/dictionary/Cargo.toml`. This avoids changing global configuration. Keep `--locked` and the pinned toolchain when doing so.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
