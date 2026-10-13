@@ -2,7 +2,7 @@
 
 A native macOS learning dictionary built with Rust and GPUI Kit. It runs an independent `codex exec` request with your installed dictionary skill for each lookup and keeps entries and measurements in local SQLite history.
 
-Phases 1–3 implement English ↔ Simplified Chinese lookups, persistent model/effort settings, and searchable history with restart recovery. See the [implementation plan](plans/dictionary-app.md) for analysis charts and macOS release work in later phases.
+Phases 1–4 implement English ↔ Simplified Chinese lookups, persistent model/effort settings, searchable history with restart recovery, and local usage analysis. See the [implementation plan](plans/dictionary-app.md) for macOS release work in Phase 5.
 
 ## Run
 
@@ -50,6 +50,22 @@ Click the **⋯** icon beside the sidebar’s **History** heading (hover for **S
 Filter by direction and outcome, then move through 25 attempts per page with **Prev** and **Next**. Rows show input, translation or outcome, version, requested model/effort, Fast when recorded, total tokens, response time, and date. Unknown measurements appear as **—**. The footer distinguishes matching attempts from distinct lookups, so regenerated versions remain visible. New requests do not shift the cursor used to fetch older pages.
 
 Open any row to read that exact saved version. **Back to History** retains the search, filters, page, and scroll position. The back arrow beside the History page title returns to your current lookup and input; **New Lookup** starts a fresh input. Background lookups continue, and neither browsing nor opening a row generates another request. Refresh re-reads local history. Deletion uses the same all-versions rule as the recent sidebar, and remains unavailable while any version is queued or running, even when that version is outside the current filter.
+
+## Analysis
+
+Open the chart icon beside Settings, or press **Command+Shift+A**. The Analysis page reads saved measurements without making model requests. Choose **7 days**, **30 days**, or a custom inclusive date range in the calendar, then filter by requested model, effort, direction, and outcome. Daily buckets use the **system local timezone**, whose name is displayed beside the calendar. Daylight-saving boundaries are resolved for each date; an asterisk marks an unfinished day. Custom ranges support up to ten years.
+
+The dashboard shows reported tokens and usage coverage, daily lookup/attempt frequency, median and nearest-rank p95 response times, a daily latency trend and distribution, and outcome counts. It also shows first-answer, queue, and CLI timing medians, weighted cached-input share, and repeated new submissions. Timing statistics use successful attempts by default; choosing an outcome changes that timing population. Sample counts remain visible, and active requests have no final latency sample.
+
+Reported token subtotals sum only known input and output counters. Cached input and reasoning are subsets, never added again. Coverage is the number of attempts with both input and output divided by all attempts in the filter. Unavailable measurements show **—**, and dates without usage or timing samples have no bar. A reported zero remains zero. Cached-input share uses only attempts reporting both cached and input counters, weighted by input tokens.
+
+Large token counts use compact K/M/B/T units with up to two decimal places, such as **1.23M**. Hover over counts in Analysis, History, or the entry toolbar for the exact value with thousands separators. Entry details and daily-chart hover details also retain exact counts.
+
+**New lookups** counts first attempts submitted in the selected range and filters. Regenerated versions increase **Attempts**; a regeneration inside the range does not count its older original lookup as a new submission. Cached/history opens add neither. Repeat rate counts additional new submissions for the same normalized input and direction, excluding regenerations and cached opens.
+
+Charts provide hover details, and the most-submitted-inputs ranking is informational. Use History to browse saved entries. Background completions and deletions refresh saved aggregates; Refresh explicitly re-reads them. The dashboard reports this app's saved attempts, not account-wide traffic or subscription charges.
+
+Validation and the 10,000-attempt measurements are recorded in [Phase 4 validation](docs/phase-4-validation.md).
 
 ## Local configuration and history
 
@@ -118,6 +134,7 @@ The UI is a thin GPUI layer over a UI-independent library:
 | `protocol` | Incremental JSONL decoding and idempotent answer/usage reconciliation. |
 | `runner` | Direct subprocess execution, pipe draining, cancellation, deadlines, and cleanup. |
 | `store` | Versioned SQLite schema and serialized database work on a dedicated thread. |
+| `analysis` | Local calendar ranges, reported-usage coverage, timing populations, aggregates, and traceable attempt selections. |
 | `service` | Per-key admission, three concurrent CLI tasks, FIFO queue, targeted cancellation, and shutdown. |
 | `view_state` | Per-attempt live state and navigation IDs; background work cannot change the selected result. |
 | `history` | Search filters, cursor pagination, row metadata, and stale-query protection. |

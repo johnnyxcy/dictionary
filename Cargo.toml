@@ -14,9 +14,11 @@ desktop = ["dep:gpui-kit"]
 anyhow = "1"
 async-channel = "2"
 chrono = { version = "0.4", features = ["serde"] }
+chrono-tz = "0.10"
 dirs = "6"
 fs2 = "0.4"
 gpui-kit = { version = "=0.7.2", optional = true }
+iana-time-zone = "0.1"
 libc = "0.2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
