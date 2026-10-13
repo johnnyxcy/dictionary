@@ -284,6 +284,8 @@ fn migration_from_phase_two_preserves_attempt_payloads_and_settings() {
         effort: f.setup.effort.clone(),
         fast_mode: true,
         skill_path: f.setup.skill_path.clone(),
+        cli_path: None,
+        appearance: Default::default(),
     };
     {
         let db = rusqlite::Connection::open(&path).unwrap();

@@ -2,6 +2,7 @@ mod analysis;
 mod formatting;
 mod history;
 mod settings;
+pub mod startup;
 use analysis::{AnalysisEvent, AnalysisView};
 use history::{HistoryEvent, HistoryView};
 use settings::{PickerItem, SettingsEvent, SettingsView};
@@ -17,7 +18,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
     component::{
-        ActiveTheme, Disableable, Icon, Selectable, Sizable, WindowExt,
+        ActiveTheme, Disableable, Icon, Selectable, Sizable, Theme, ThemeMode, WindowExt,
         button::{Button, ButtonVariants},
         input::{Textarea, TextareaState},
         notification::{Notification, NotificationList},
@@ -35,6 +36,7 @@ actions!(
     dictionary,
     [
         FocusLookup,
+        NewLookup,
         FocusHistory,
         FocusAnalysis,
         ToggleSidebar,
@@ -53,6 +55,9 @@ enum Page {
 }
 
 pub struct DictionaryView {
+    data_directory: std::path::PathBuf,
+    fatal: Option<String>,
+    _appearance_subscription: Subscription,
     input: Entity<TextareaState>,
     direction: DirectionChoice,
     direction_picker: Entity<SelectState<Vec<PickerItem<DirectionChoice>>>>,
@@ -86,6 +91,7 @@ impl DictionaryView {
     pub fn new(
         service: Service,
         events: async_channel::Receiver<Event>,
+        data_directory: std::path::PathBuf,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -174,7 +180,20 @@ impl DictionaryView {
             this.service.take();
             async {}
         });
+        let appearance_subscription = cx.observe_window_appearance(window, |this, window, cx| {
+            if this
+                .settings_state
+                .preferences
+                .as_ref()
+                .is_none_or(|p| p.appearance == dictionary::settings::Appearance::System)
+            {
+                Theme::sync_system_appearance(Some(window), cx);
+            }
+        });
         Self {
+            data_directory,
+            fatal: None,
+            _appearance_subscription: appearance_subscription,
             input,
             direction: DirectionChoice::Auto,
             direction_picker,
@@ -312,6 +331,9 @@ impl DictionaryView {
                 }
             }
             Event::Settings(state) => {
+                if let Some(preferences) = &state.preferences {
+                    apply_appearance(preferences.appearance, window, cx);
+                }
                 self.settings_state = *state;
                 if let Some(view) = &self.settings_view {
                     view.update(cx, |view, cx| {
@@ -324,7 +346,7 @@ impl DictionaryView {
                     view.update(cx, |view, cx| view.finish_save(cx));
                 }
                 self.push_notification(
-                    Notification::success("New lookups will use these settings.")
+                    Notification::success("Your preferences have been saved.")
                         .title("Settings saved")
                         .id::<SettingsNotification>()
                         .placement(Anchor::BottomRight),
@@ -394,7 +416,7 @@ impl DictionaryView {
             }
             Event::Notice(message) => self.notice = Some(message),
             Event::Fatal(message) => {
-                self.notice = Some(message);
+                self.fatal = Some(message);
                 self.connecting = false;
                 self.setup = None;
                 self.deleting = None;
@@ -407,6 +429,9 @@ impl DictionaryView {
     }
 
     fn new_lookup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
         self.page = Page::Dictionary;
         self.return_to_history = false;
         self.history_view.update(cx, |view, _| view.hide());
@@ -437,6 +462,9 @@ impl DictionaryView {
     }
 
     fn open_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
         self.lookups.begin_navigation();
         self.page = Page::History;
         self.analysis_view.update(cx, |view, _| view.hide());
@@ -447,6 +475,9 @@ impl DictionaryView {
     }
 
     fn open_analysis(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
         self.lookups.begin_navigation();
         self.page = Page::Analysis;
         self.notice = None;
@@ -463,6 +494,9 @@ impl DictionaryView {
     }
 
     fn show_dictionary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if window.has_active_dialog(cx) {
+            return;
+        }
         self.lookups.begin_navigation();
         self.page = Page::Dictionary;
         self.history_view.update(cx, |view, _| view.hide());
@@ -543,7 +577,7 @@ impl DictionaryView {
             },
         ));
         self.settings_view = Some(view.clone());
-        window.open_dialog(cx, move |dialog, _, _| {
+        window.open_dialog(cx, move |dialog, _, cx| {
             let cancel_view = view.clone();
             let save_view = view.clone();
             dialog
@@ -557,6 +591,7 @@ impl DictionaryView {
                     save_view.update(cx, |view, cx| view.save(cx));
                     false
                 })
+                .footer(view.update(cx, |view, cx| view.footer(cx)))
                 .child(view.clone())
         });
     }
@@ -673,6 +708,8 @@ impl DictionaryView {
                     })
                     .children(self.lookups.history.iter().map(|entry| {
                         let id = entry.id.clone();
+                        let keyboard_id = id.clone();
+                        let keyboard_lookup = entry.lookup_id.clone();
                         let lookup_id = entry.lookup_id.clone();
                         let delete_id = entry.lookup_id.clone();
                         let delete_disabled =
@@ -738,6 +775,9 @@ impl DictionaryView {
                                     .id("open-history-entry")
                                     .role(Role::Button)
                                     .tab_index(0)
+                                    .focus_visible(|style| {
+                                        style.bg(theme.accent).border_2().border_color(theme.ring)
+                                    })
                                     .aria_label(format!("{} · {}", entry.input, translation))
                                     .min_w_0()
                                     .flex_1()
@@ -796,7 +836,25 @@ impl DictionaryView {
                                         if this.deleting.as_ref() != Some(&lookup_id) {
                                             this.open_attempt(id.clone(), false, cx);
                                         }
-                                    })),
+                                    }))
+                                    .on_key_down(cx.listener(
+                                        move |this, event: &KeyDownEvent, _, cx| {
+                                            if matches!(
+                                                event.keystroke.key.as_str(),
+                                                "enter" | "space"
+                                            ) {
+                                                cx.stop_propagation();
+                                                if this.deleting.as_ref() != Some(&keyboard_lookup)
+                                                {
+                                                    this.open_attempt(
+                                                        keyboard_id.clone(),
+                                                        false,
+                                                        cx,
+                                                    );
+                                                }
+                                            }
+                                        },
+                                    )),
                             )
                             .child(
                                 // Reserve the action's space so hovering never shifts the text.
@@ -1320,18 +1378,29 @@ impl DictionaryView {
                         .min_h_0()
                         .overflow_hidden()
                         .child(
-                            TextView::markdown(
-                                SharedString::from(format!("entry-{}", attempt.id)),
-                                attempt.answer.clone(),
-                            )
-                            .selectable(true)
-                            .scrollable(true)
-                            .size_full()
-                            .on_link_click(|url, _, _, cx| {
-                                if url.starts_with("https://") || url.starts_with("http://") {
-                                    cx.open_url(url);
-                                }
-                            }),
+                            div()
+                                .id("entry-accessible-text")
+                                .role(Role::Label)
+                                .aria_label(attempt.answer.clone())
+                                .size_full()
+                                .child(
+                                    TextView::markdown(
+                                        SharedString::from(format!("entry-{}", attempt.id)),
+                                        attempt.answer.clone(),
+                                    )
+                                    .selectable(true)
+                                    .scrollable(true)
+                                    .size_full()
+                                    .on_link_click(
+                                        |url, _, _, cx| {
+                                            if url.starts_with("https://")
+                                                || url.starts_with("http://")
+                                            {
+                                                cx.open_url(url);
+                                            }
+                                        },
+                                    ),
+                                ),
                         )
                         .into_any_element()
                 })
@@ -1376,6 +1445,9 @@ impl DictionaryView {
 
 impl Render for DictionaryView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(message) = &self.fatal {
+            return startup::error_panel(message, Some(&self.data_directory), cx);
+        }
         let theme = cx.theme();
         div()
             .flex()
@@ -1386,7 +1458,10 @@ impl Render for DictionaryView {
             // The textarea handles Shift+Enter and propagates submit actions.
             .on_action(cx.listener(
                 |this, action: &gpui_kit::component::input::Enter, window, cx| {
-                    if this.page == Page::Dictionary && !action.shift {
+                    if this.page == Page::Dictionary
+                        && !action.shift
+                        && !window.has_active_dialog(cx)
+                    {
                         let composing = this.input.update(cx, |input, cx| {
                             input.marked_text_range(window, cx).is_some()
                         });
@@ -1399,6 +1474,9 @@ impl Render for DictionaryView {
             ))
             .on_action(cx.listener(|this, _: &FocusLookup, window, cx| {
                 this.show_dictionary(window, cx);
+            }))
+            .on_action(cx.listener(|this, _: &NewLookup, window, cx| {
+                this.new_lookup(window, cx);
             }))
             .on_action(
                 cx.listener(|this, _: &FocusHistory, window, cx| this.open_history(window, cx)),
@@ -1478,6 +1556,28 @@ impl Render for DictionaryView {
                     }),
             )
             .child(self.notification_layer(window))
+    }
+}
+
+fn apply_appearance(
+    appearance: dictionary::settings::Appearance,
+    window: &mut Window,
+    cx: &mut App,
+) {
+    use dictionary::settings::Appearance;
+    match appearance {
+        Appearance::System => {
+            cx.set_window_appearance(None);
+            Theme::sync_system_appearance(Some(window), cx);
+        }
+        Appearance::Light => {
+            cx.set_window_appearance(Some(WindowAppearance::Light));
+            Theme::change(ThemeMode::Light, Some(window), cx);
+        }
+        Appearance::Dark => {
+            cx.set_window_appearance(Some(WindowAppearance::Dark));
+            Theme::change(ThemeMode::Dark, Some(window), cx);
+        }
     }
 }
 

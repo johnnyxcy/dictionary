@@ -86,7 +86,7 @@ impl ProcessGroup {
         }
     }
 
-    fn disarm(&mut self) {
+    pub(crate) fn disarm(&mut self) {
         self.0 = None;
     }
 }
@@ -106,49 +106,52 @@ pub async fn run(
     timeout: Duration,
     submitted: Instant,
 ) -> Attempt {
-    let mut command = Command::new(&attempt.setup.executable);
-    command
-        .args([
-            "--no-daemon",
-            "exec",
-            "--json",
-            "--ephemeral",
-            "--skip-git-repo-check",
-            "--color",
-            "never",
-            "--sandbox",
-            "read-only",
-            "--model",
-        ])
-        .arg(&attempt.setup.model)
-        .arg("-c")
-        .arg("approval_policy=\"never\"")
-        .arg("-c")
-        .arg("model_reasoning_summary=\"auto\"")
-        .arg("-c")
-        .arg("hide_agent_reasoning=false")
-        .arg("-c")
-        .arg(format!(
-            "model_reasoning_effort={}",
-            serde_json::to_string(&attempt.setup.effort).expect("string serialization")
-        ));
-    if let Some(tier) = &attempt.setup.service_tier {
+    let spawn = || -> Result<(Child, ProcessGroup)> {
+        let mut command = crate::discovery::cli_command(&attempt.setup.executable)?;
         command
+            .args([
+                "--no-daemon",
+                "exec",
+                "--json",
+                "--ephemeral",
+                "--skip-git-repo-check",
+                "--color",
+                "never",
+                "--sandbox",
+                "read-only",
+                "--model",
+            ])
+            .arg(&attempt.setup.model)
             .arg("-c")
-            .arg(format!("service_tier=\"{}\"", tier.config_value()));
-        if matches!(tier, crate::model::ServiceTier::Fast) {
-            command.args(["-c", "features.fast_mode=true"]);
+            .arg("approval_policy=\"never\"")
+            .arg("-c")
+            .arg("model_reasoning_summary=\"auto\"")
+            .arg("-c")
+            .arg("hide_agent_reasoning=false")
+            .arg("-c")
+            .arg(format!(
+                "model_reasoning_effort={}",
+                serde_json::to_string(&attempt.setup.effort).expect("string serialization")
+            ));
+        if let Some(tier) = &attempt.setup.service_tier {
+            command
+                .arg("-c")
+                .arg(format!("service_tier=\"{}\"", tier.config_value()));
+            if matches!(tier, crate::model::ServiceTier::Fast) {
+                command.args(["-c", "features.fast_mode=true"]);
+            }
         }
-    }
-    command
-        .arg("-")
-        .current_dir(working_directory)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        command
+            .arg("-")
+            .current_dir(working_directory)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        ProcessGroup::spawn(&mut command)
+    };
     let cli_started = Instant::now();
     attempt.queue_duration_ms = Some(millis(submitted));
-    let (mut child, mut group) = match ProcessGroup::spawn(&mut command) {
+    let (mut child, mut group) = match spawn() {
         Ok(value) => value,
         Err(error) => {
             attempt.status = AttemptStatus::Failed;

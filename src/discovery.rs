@@ -49,19 +49,19 @@ impl AppPaths {
     }
 }
 
-pub fn find_executable() -> Result<PathBuf> {
-    if let Some(path) = std::env::var_os("DICTIONARY_CLI") {
-        let path = PathBuf::from(path);
-        ensure!(
-            is_executable(&path),
-            "DICTIONARY_CLI must point to an executable file"
-        );
+pub fn find_executable(configured: Option<&Path>) -> Result<PathBuf> {
+    if let Some(path) = std::env::var_os("DICTIONARY_CLI")
+        .map(PathBuf::from)
+        .or_else(|| configured.map(Path::to_owned))
+    {
+        validate_executable(&path)?;
         // Keep symlink names: some CLI launchers use argv[0] to select a command.
         return Ok(path);
     }
     let mut candidates = std::env::var_os("PATH")
         .map(|paths| {
             std::env::split_paths(&paths)
+                .filter(|path| path.is_absolute())
                 .map(|p| p.join("codex"))
                 .collect::<Vec<_>>()
         })
@@ -73,7 +73,20 @@ pub fn find_executable() -> Result<PathBuf> {
     if let Some(home) = dirs::home_dir() {
         candidates.push(home.join(".local/bin/codex"));
     }
-    candidates.into_iter().find(|p| is_executable(p)).context("Codex was not found. Install the Codex CLI, or set DICTIONARY_CLI to its absolute executable path, then reconnect.")
+    candidates.into_iter().find(|p| is_executable(p)).context("Codex was not found. In Terminal, run `command -v codex`, then choose that executable in Settings → CLI location. Install the CLI first if the command has no result.")
+}
+
+pub fn validate_executable(path: &Path) -> Result<()> {
+    ensure!(
+        path.is_absolute(),
+        "Choose an absolute CLI executable path in Settings"
+    );
+    ensure!(
+        is_executable(path),
+        "The CLI at {} is missing or is not executable. Choose its current location in Settings.",
+        path.display()
+    );
+    Ok(())
 }
 
 fn is_executable(path: &Path) -> bool {
@@ -94,34 +107,84 @@ fn is_executable(path: &Path) -> bool {
     }
 }
 
-pub async fn discover_catalog(workspace: PathBuf) -> Result<Catalog> {
-    tokio::time::timeout(Duration::from_secs(45), discover_inner(workspace))
-        .await
-        .context(
-            "Codex setup timed out. Saved history is still available; reconnect to try again.",
-        )?
+/// Launch without sourcing a shell. Adjacent runtimes support installations
+/// such as npm/nvm whose launcher uses /usr/bin/env even when Finder has a small PATH.
+pub(crate) fn cli_command(executable: &Path) -> Result<Command> {
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let mut paths = Vec::new();
+    let mut link = executable.to_owned();
+    for _ in 0..16 {
+        if let Some(parent) = link.parent() {
+            paths.push(parent.to_owned());
+        }
+        let Ok(target) = std::fs::read_link(&link) else {
+            break;
+        };
+        link = if target.is_absolute() {
+            target
+        } else {
+            link.parent().unwrap_or(Path::new("/")).join(target)
+        };
+    }
+    paths.extend(std::env::split_paths(&inherited).filter(|p| p.is_absolute()));
+    for path in [
+        Path::new("/opt/homebrew/bin"),
+        Path::new("/usr/local/bin"),
+        Path::new("/usr/bin"),
+        Path::new("/bin"),
+        Path::new("/usr/sbin"),
+        Path::new("/sbin"),
+    ] {
+        if !paths.iter().any(|p| p == path) {
+            paths.push(path.to_owned());
+        }
+    }
+    let mut command = Command::new(executable);
+    command.env("PATH", std::env::join_paths(paths)?);
+    Ok(command)
 }
 
-async fn discover_inner(workspace: PathBuf) -> Result<Catalog> {
-    let executable = find_executable()?;
-    let version = Command::new(&executable)
+pub async fn discover_catalog(workspace: PathBuf, configured: Option<PathBuf>) -> Result<Catalog> {
+    tokio::time::timeout(
+        Duration::from_secs(45),
+        discover_inner(workspace, configured),
+    )
+    .await
+    .context("Codex setup timed out. Saved history is still available; reconnect to try again.")?
+}
+
+async fn discover_inner(workspace: PathBuf, configured: Option<PathBuf>) -> Result<Catalog> {
+    let executable = find_executable(configured.as_deref())?;
+    let mut version_command = cli_command(&executable)?;
+    version_command
         .arg("--version")
-        .kill_on_drop(true)
-        .output()
-        .await?;
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let (child, mut version_group) =
+        ProcessGroup::spawn(&mut version_command).with_context(|| {
+            format!(
+                "Cannot start {}. Choose a working CLI executable in Settings.",
+                executable.display()
+            )
+        })?;
+    let version = child.wait_with_output().await?;
+    version_group.terminate();
+    version_group.disarm();
     ensure!(
         version.status.success(),
-        "The configured Codex executable did not respond to --version"
+        "The CLI at {} did not respond to --version. Check that this is the Codex executable and that its runtime is installed. {}",
+        executable.display(),
+        String::from_utf8_lossy(&version.stderr).trim()
     );
     let cli_version = String::from_utf8(version.stdout)?.trim().to_owned();
-    let mut command = Command::new(&executable);
+    let mut command = cli_command(&executable)?;
     command
         .args(["app-server", "--stdio"])
         .current_dir(&workspace)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null());
-    let (mut child, group) =
+    let (mut child, mut group) =
         ProcessGroup::spawn(&mut command).context("Cannot start Codex metadata discovery")?;
     let mut rpc = Rpc {
         input: child.stdin.take().context("Missing metadata input pipe")?,
@@ -165,6 +228,7 @@ async fn discover_inner(workspace: PathBuf) -> Result<Catalog> {
     group.terminate();
     let _ = child.kill().await;
     let _ = child.wait().await;
+    group.disarm();
     result
 }
 

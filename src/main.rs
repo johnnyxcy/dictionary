@@ -1,22 +1,20 @@
+mod menus;
 mod ui;
 
 use dictionary::{discovery::AppPaths, service::Service};
 use gpui_kit::*;
 
 fn main() -> anyhow::Result<()> {
-    let paths = AppPaths::discover()?;
-    let (service, events) = Service::start(paths)?;
-    application().with_assets(assets::AllAssets).run(move |cx| {
+    let startup = AppPaths::discover().and_then(|paths| {
+        let data = paths.data.clone();
+        Service::start(paths).map(|(service, events)| (service, events, data))
+    });
+    let app = application().with_assets(assets::AllAssets);
+    app.on_reopen(menus::show_window);
+    app.run(move |cx| {
         gpui_kit::init(cx);
-        cx.bind_keys([
-            KeyBinding::new("cmd-l", ui::FocusLookup, None),
-            KeyBinding::new("cmd-f", ui::FocusHistory, None),
-            KeyBinding::new("cmd-shift-a", ui::FocusAnalysis, None),
-            KeyBinding::new("cmd-b", ui::ToggleSidebar, None),
-            KeyBinding::new("cmd-,", ui::OpenSettings, None),
-            KeyBinding::new("cmd-q", ui::Quit, None),
-        ]);
-        cx.on_action(|_: &ui::Quit, cx| cx.quit());
+        gpui_kit::component::Theme::sync_system_appearance(None, cx);
+        menus::init(cx);
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {
                 cx.quit();
@@ -24,20 +22,29 @@ fn main() -> anyhow::Result<()> {
         })
         .detach();
         let bounds = Bounds::centered(None, size(px(1180.), px(820.)), cx);
-        open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                window_min_size: Some(size(px(900.), px(620.))),
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Dictionary".into()),
-                    ..Default::default()
-                }),
+        let options = WindowOptions {
+            window_bounds: Some(WindowBounds::Windowed(bounds)),
+            window_min_size: Some(size(px(900.), px(620.))),
+            titlebar: Some(TitlebarOptions {
+                title: Some("Dictionary".into()),
                 ..Default::default()
-            },
-            cx,
-            |window, cx| cx.new(|cx| ui::DictionaryView::new(service, events, window, cx)),
-        )
-        .expect("Cannot open Dictionary window");
+            }),
+            ..Default::default()
+        };
+        match startup {
+            Ok((service, events, data)) => {
+                open_window(options, cx, |window, cx| {
+                    cx.new(|cx| ui::DictionaryView::new(service, events, data, window, cx))
+                })
+                .expect("Cannot open Dictionary window");
+            }
+            Err(error) => {
+                open_window(options, cx, |_, cx| {
+                    cx.new(|_| ui::startup::StartupError(format!("{error:#}")))
+                })
+                .expect("Cannot open Dictionary startup diagnostics");
+            }
+        }
         cx.activate(true);
     });
     Ok(())

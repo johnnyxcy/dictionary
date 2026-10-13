@@ -2,11 +2,11 @@
 
 A native macOS learning dictionary built with Rust and GPUI Kit. It runs an independent `codex exec` request with your installed dictionary skill for each lookup and keeps entries and measurements in local SQLite history.
 
-Phases 1–4 implement English ↔ Simplified Chinese lookups, persistent model/effort settings, searchable history with restart recovery, and local usage analysis. See the [implementation plan](plans/dictionary-app.md) for macOS release work in Phase 5.
+English ↔ Simplified Chinese lookups, persistent settings, searchable history with restart recovery, and local usage analysis are implemented. Phase 5 adds a local macOS app bundle, Finder-compatible CLI setup, appearance settings, accessible chart data, and protected database upgrades. See the [implementation plan](plans/dictionary-app.md) and [release validation](docs/phase-5-validation.md) for acceptance results and remaining manual checks.
 
 ## Run
 
-Requirements:
+Requirements to build:
 
 - macOS 15 or later and Xcode Command Line Tools.
 - Rust through rustup; this repository pins Rust 1.99.0.
@@ -17,9 +17,20 @@ Requirements:
 cargo run --locked
 ```
 
+For an optimized application you can launch from Finder:
+
+```sh
+python3 scripts/bundle.py
+open 'target/Dictionary.app'
+```
+
+You can move `Dictionary.app` to Applications. The bundle targets macOS 15 or later on the build machine's architecture, includes its icon, and uses local ad-hoc signing without a certificate. Packaging verifies the signature and rejects non-system dynamic libraries. Rust and Xcode are build requirements; using the bundle requires the CLI, its runtime (if applicable), and your dictionary skill. Public Developer ID signing, notarization, universal builds, and automatic updates are outside this local release.
+
+The macOS menu bar registers **Dictionary**, **File**, **Edit**, **View**, and **Window** menus, including About, Settings, Services, standard editing commands, navigation, hiding, minimizing, and closing. Right-click the running app's Dock icon for **Show Dictionary**, **New Lookup**, **History**, **Analysis**, and **Settings…**. Dock navigation brings the existing window forward; an open settings draft stays in place until resolved. Clicking the Dock icon also raises the existing window. Closing the last window or choosing Quit retains the same cancellation and save behavior.
+
 On first launch, the app selects your configured CLI model when available, otherwise the catalog default, and prefers Low effort when supported. Later launches restore your saved settings. The chosen pair appears at the bottom of the sidebar. It reuses CLI authentication and leaves your global CLI configuration unchanged.
 
-Enter text and press **Enter**, or click **Look up**. **Shift+Enter** inserts a newline, and the compact input expands for multiline text. **Command+Enter** also submits. **Command+L** returns to Dictionary and focuses the input, **Command+F** opens History, and **Command+B** toggles the sidebar. The result supports selection, scrolling, and the **Copy** icon copies it as Markdown. Up to **three lookups run concurrently**; additional requests wait in a first-in, first-out queue. **Look up** always submits the current input. **Stop**, beside the selected entry’s running status, cancels only that entry (or removes it from the queue before it starts). New Lookup and switching history entries leave other requests running; their completion never changes your selected view. Select an item in History to read its saved result without generating another entry.
+Enter text and press **Enter**, or click **Look up**. **Shift+Enter** inserts a newline, and the compact input expands for multiline text. **Command+Enter** also submits. **Command+N** starts New Lookup, **Command+L** returns to Dictionary and focuses the input, **Command+F** opens History, and **Command+B** toggles the sidebar. Native File and Edit menus expose navigation and standard editing commands. Focus a sidebar entry with Tab and open it with Enter or Space. The result supports selection, scrolling, and the **Copy** icon copies it as Markdown. Up to **three lookups run concurrently**; additional requests wait in a first-in, first-out queue. **Look up** always submits the current input. **Stop**, beside the selected entry’s running status, cancels only that entry (or removes it from the queue before it starts). New Lookup and switching history entries leave other requests running; their completion never changes your selected view. Select an item in History to read its saved result without generating another entry.
 
 Searching an expression that is already running or queued in the same translation direction opens that attempt. Otherwise, searching an already saved expression opens its latest successful result, including while all slots are busy or the CLI is unavailable. It makes no model request and adds no attempt or token usage. Matching ignores surrounding whitespace and canonical Unicode differences, but preserves case, punctuation, and internal whitespace. Failed or incomplete attempts never replace a successful cached result. Use **Regenerate**, immediately left of Copy, to request a fresh entry for the selected result's original input and direction using the current configuration. Earlier attempts and their measurements remain in history. Repeated clicks on Look up or Regenerate reuse an active attempt for the same expression and direction.
 
@@ -33,15 +44,14 @@ During a lookup, the activity panel displays reported thinking summaries, progre
 
 Each request selects `model_reasoning_summary="auto"` and `hide_agent_reasoning=false` through local CLI arguments, following the [configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference). This requests available summaries without changing global settings or the selected thinking effort. The amount and timing of information still depend on the model and CLI stream; some completed lookups have no reported activity.
 
-To create a local development app bundle after building:
+To build a local development app bundle:
 
 ```sh
-cargo build --locked
 python3 scripts/bundle-dev.py
 open 'target/Dictionary Dev.app'
 ```
 
-This is a development bundle. Signing, notarization, and distribution are outside Phase 1.
+Use `--skip-build` to package an existing build. Both entry points use the same bundle validation.
 
 ## Searchable History
 
@@ -63,7 +73,7 @@ Large token counts use compact K/M/B/T units with up to two decimal places, such
 
 **New lookups** counts first attempts submitted in the selected range and filters. Regenerated versions increase **Attempts**; a regeneration inside the range does not count its older original lookup as a new submission. Cached/history opens add neither. Repeat rate counts additional new submissions for the same normalized input and direction, excluding regenerations and cached opens.
 
-Charts provide hover details, and the most-submitted-inputs ranking is informational. Use History to browse saved entries. Background completions and deletions refresh saved aggregates; Refresh explicitly re-reads them. The dashboard reports this app's saved attempts, not account-wide traffic or subscription charges.
+Charts provide hover details. **Data** switches each chart to labeled text rows with the same dates, exact values, sample counts, and unavailable measurements; **Charts** switches back. This provides an alternative to reading the plots or hovering. The most-submitted-inputs ranking is informational. Use History to browse saved entries. Background completions and deletions refresh saved aggregates; Refresh explicitly re-reads them. The dashboard reports this app's saved attempts, not account-wide traffic or subscription charges.
 
 Validation and the 10,000-attempt measurements are recorded in [Phase 4 validation](docs/phase-4-validation.md).
 
@@ -79,20 +89,28 @@ Settings persist in SQLite and apply to newly admitted requests. Running and que
 
 Saving keeps Settings open and shows a success or error toast. Errors retain the draft for correction and remain visible until dismissed or replaced by a later save result.
 
+**Appearance** offers System, Light, and Dark, applied when saved. System follows the window's macOS appearance. Appearance can be changed even when CLI or skill setup is unavailable. Settings keeps Cancel and Save visible while its contents scroll in a small window.
+
 **Cancel**, the close icon, and Escape ask before discarding unsaved settings, with **Keep editing** and **Discard** choices. Unchanged, reverted, or successfully saved settings close immediately. Closing is blocked while a save is in progress.
 
 Settings also shows the selected skill, offers a native **Browse…** file picker for relocation, and provides **Refresh** plus CLI diagnostics. Byte-identical skill copies collapse into one choice; differing copies require selection. The catalog is cached with its retrieval time and CLI version, refreshed on startup and explicitly in Settings, and labeled **Cached catalog** when refresh fails. Cached entries remain readable offline.
+
+**CLI location** accepts an absolute executable path or a native file selection. If Finder cannot find your CLI, run `command -v codex` in Terminal and paste that path here, then Save. Saving a new executable reconnects catalog discovery; already admitted requests keep their previous executable and settings. Clear the path for automatic discovery. Child processes receive the executable's directory, resolved symlink directories, and standard macOS executable locations in PATH, supporting adjacent runtimes without sourcing shell startup files. Authenticate through `codex login` in Terminal if the CLI reports a login error, then use Refresh. Credentials remain managed by the CLI.
 
 Optional development overrides (model and skill overrides seed the initial preferences; use Settings after the first launch):
 
 | Variable | Purpose |
 | --- | --- |
-| `DICTIONARY_CLI` | Absolute path to the CLI executable. Otherwise search PATH and common macOS installation locations. |
+| `DICTIONARY_CLI` | Override the saved CLI executable with an absolute path. Otherwise use the saved path, then automatic PATH/common-location discovery when no path is saved. |
 | `DICTIONARY_MODEL` | Select an identifier advertised by the CLI model catalog. |
 | `DICTIONARY_SKILL_PATH` | Absolute path to the selected `SKILL.md`; useful if different copies are installed. |
 | `DICTIONARY_DATA_DIR` | Alternate directory for history and the isolated CLI working directory. |
 
 The default database is `~/Library/Application Support/Dictionary/history.sqlite3`. It contains original inputs, Markdown entries, outcomes, immutable request configuration, skill snapshots, reported usage, and timings. The recent sidebar shows the latest 200 attempts; History and cached lookups cover the entire database. Schema version 4 adds history ordering and outcome indexes, preserving existing attempt payloads, settings, and skill snapshots. Older entries keep their English → Chinese direction. A file lock prevents competing app instances from using the same history.
+
+Before upgrading an existing schema, the app creates a consistent SQLite backup named `history.pre-v<old-version>-<id>.sqlite3` beside the database, including committed WAL data. All pending migrations run in one transaction. A failed migration rolls back and reports the backup path; failure to create a backup prevents the upgrade. Databases from newer versions are rejected without modification. Startup errors open a diagnostic window with Copy details, Open data folder, and Quit where available; the app never resets history to recover from an error.
+
+For manual recovery, quit every app instance first. Preserve the database and any `history.sqlite3-wal` and `history.sqlite3-shm` files together in a separate folder. If restoring a pre-upgrade backup, copy it to `history.sqlite3` only after moving those originals aside; do not mix an older database with leftover WAL files. Keep the backup and use a version compatible with its schema. Prefer fixing permissions, disk space, or the reported migration problem before restoring data.
 
 The prompt reads the selected skill file for every lookup and records its SHA-256 and exact contents. Byte-identical installed copies are collapsed. The input travels as JSON-encoded text through stdin, never through shell interpolation. Each request has fresh context and uses a dedicated CLI process in a read-only sandbox with `--ephemeral` and `--no-daemon`.
 
@@ -121,7 +139,7 @@ The setup script installs `rustfmt` and `clippy` for the pinned toolchain in `ru
 
 Run the same checks manually with `./.githooks/pre-commit`.
 
-The [PR checks workflow](.github/workflows/pr.yml) runs on pull requests and pushes to `main`, with a manual run option. Its macOS job uses the pinned Rust toolchain to run the same formatting/lint checks, the test suite without model requests, and a native application build. It caches Cargo dependencies and build outputs and cancels older runs when a PR is updated.
+The [PR checks workflow](.github/workflows/pr.yml) runs on pull requests and pushes to `main`, with a manual run option. Its macOS job uses the pinned Rust toolchain to run the same formatting/lint checks, the test suite without model requests, a native application build, and app bundle validation. It caches Cargo dependencies and build outputs and cancels older runs when a PR is updated.
 
 The UI is a thin GPUI layer over a UI-independent library:
 
@@ -134,11 +152,11 @@ The UI is a thin GPUI layer over a UI-independent library:
 | `protocol` | Incremental JSONL decoding and idempotent answer/usage reconciliation. |
 | `runner` | Direct subprocess execution, pipe draining, cancellation, deadlines, and cleanup. |
 | `store` | Versioned SQLite schema and serialized database work on a dedicated thread. |
-| `analysis` | Local calendar ranges, reported-usage coverage, timing populations, aggregates, and traceable attempt selections. |
+| `analysis` | Local calendar ranges, reported-usage coverage, timing populations, and saved aggregates. |
 | `service` | Per-key admission, three concurrent CLI tasks, FIFO queue, targeted cancellation, and shutdown. |
 | `view_state` | Per-attempt live state and navigation IDs; background work cannot change the selected result. |
 | `history` | Search filters, cursor pagination, row metadata, and stale-query protection. |
-| `ui` | Native input, Markdown result, recent sidebar, History page, Settings, and per-entry details. |
+| `ui` | Native input, Markdown result, history, analysis with text alternatives, Settings, appearance, and startup diagnostics. |
 
 ```sh
 cargo fmt --all -- --check
@@ -147,7 +165,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo build --locked
 ```
 
-Core tests use an observed CLI fixture and controllable local executables; they make no model requests. They cover split UTF-8/JSONL, repeated events, unknown/missing usage, literal input, durable history, failure after output, authentication errors, cancellation, timeouts, concurrent result isolation, queue advancement, active-key deduplication, shutdown, and stale navigation events. History tests cover literal English/Chinese search, stable pagination during writes/deletion, schema migration, and reading results during active work. Recovery tests kill a separate service process and verify saved partial output or reported usage after restart without another request. See [Phase 1 validation](docs/phase-1-validation.md), [Phase 2 validation](docs/phase-2-validation.md), and [Phase 3 validation](docs/phase-3-validation.md).
+Core tests use an observed CLI fixture and controllable local executables; they make no model requests. They cover split UTF-8/JSONL, repeated events, unknown/missing usage, literal input, durable history, failure after output, authentication errors, cancellation, timeouts, concurrent result isolation, queue advancement, active-key deduplication, shutdown, and stale navigation events. History tests cover literal English/Chinese search, stable pagination during writes/deletion, schema migration, and reading results during active work. Recovery tests kill a separate service process and verify saved partial output or reported usage after restart without another request. Release tests launch with a minimal PATH and a symlinked CLI/runtime, preserve preferences across restart, and verify migration rollback and backups. See [Phase 1 validation](docs/phase-1-validation.md), [Phase 2 validation](docs/phase-2-validation.md), [Phase 3 validation](docs/phase-3-validation.md), and [Phase 5 validation](docs/phase-5-validation.md).
 
 A headless example exercises the same coordinator and persistence path. It uses a cached result when available; otherwise it makes a real request using your CLI account:
 

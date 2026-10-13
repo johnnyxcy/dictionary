@@ -61,3 +61,6 @@ jobs:
 
       - name: Build native macOS application
         run: cargo build --locked
+
+      - name: Validate local macOS app packaging
+        run: python3 scripts/bundle.py --profile dev --skip-build

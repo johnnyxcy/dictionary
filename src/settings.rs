@@ -5,6 +5,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::model::{ServiceTier, Setup};
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Appearance {
+    #[default]
+    System,
+    Light,
+    Dark,
+}
+
 pub const EFFORTS: [(&str, &str); 4] = [
     ("low", "Low"),
     ("medium", "Med"),
@@ -58,6 +67,10 @@ pub struct Preferences {
     #[serde(default)]
     pub fast_mode: bool,
     pub skill_path: PathBuf,
+    #[serde(default)]
+    pub cli_path: Option<PathBuf>,
+    #[serde(default)]
+    pub appearance: Appearance,
 }
 
 impl Preferences {
@@ -76,6 +89,8 @@ impl Preferences {
         Self {
             version: 1,
             fast_mode: false,
+            cli_path: Some(catalog.executable.clone()),
+            appearance: Appearance::System,
             model: model.map(|m| m.model.clone()).unwrap_or_default(),
             effort: model
                 .map(|m| {
@@ -101,6 +116,17 @@ impl Preferences {
         ensure!(
             self.version == 1,
             "Settings were created by a newer Dictionary version"
+        );
+        // A catalog from another executable cannot validate this connection.
+        // Development overrides intentionally take precedence over saved paths.
+        let executable = std::env::var_os("DICTIONARY_CLI")
+            .map(PathBuf::from)
+            .or_else(|| self.cli_path.clone());
+        ensure!(
+            executable
+                .as_ref()
+                .is_none_or(|path| path == &catalog.executable),
+            "Connect to the selected CLI before choosing a model. Refresh Settings to try again."
         );
         let model = catalog
             .models
@@ -138,6 +164,13 @@ impl Preferences {
             skill_path: self.skill_path.clone(),
             skill_name: name,
         })
+    }
+
+    pub fn same_generation_settings(&self, other: &Self) -> bool {
+        self.model == other.model
+            && self.effort == other.effort
+            && self.fast_mode == other.fast_mode
+            && self.skill_path == other.skill_path
     }
 }
 
