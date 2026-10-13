@@ -37,7 +37,7 @@ partial = f"# {text}\n\n" + (f"Natural English equivalent of {text}" if reverse 
 item("started", "answer", "agent_message", phase="final_answer", text=partial)
 release = control / ("release-" + hashlib.sha256(text.encode()).hexdigest())
 deadline = time.monotonic() + 120
-while not release.exists():
+while not release.exists() and text != "crash after usage fixture":
     if time.monotonic() > deadline:
         raise SystemExit("Fixture was not released within 120 seconds")
     time.sleep(0.01)
@@ -47,3 +47,10 @@ if text == "simulate failure":
 item("completed", "reasoning", "reasoning", text=f"Checked the meaning of {text} (synthetic fixture).")
 item("completed", "answer", "agent_message", phase="final_answer", text=partial + "\n\n*This is a synthetic concurrency test.*")
 emit({"type": "turn.completed", "usage": {"input_tokens": 100 + len(text), "cached_input_tokens": 60, "output_tokens": 10 + len(text)}})
+if text == "crash after usage fixture":
+    # Keep the process alive after terminal usage so restart tests can kill the
+    # service before a final outcome save, without relying on a timing race.
+    while not release.exists():
+        if time.monotonic() > deadline:
+            raise SystemExit("Fixture was not released within 120 seconds")
+        time.sleep(0.01)

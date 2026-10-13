@@ -10,6 +10,7 @@ fn main() -> anyhow::Result<()> {
         gpui_kit::init(cx);
         cx.bind_keys([
             KeyBinding::new("cmd-l", ui::FocusLookup, None),
+            KeyBinding::new("cmd-f", ui::FocusHistory, None),
             KeyBinding::new("cmd-b", ui::ToggleSidebar, None),
             KeyBinding::new("cmd-,", ui::OpenSettings, None),
             KeyBinding::new("cmd-q", ui::Quit, None),

@@ -2,6 +2,7 @@
 
 pub mod direction;
 pub mod discovery;
+pub mod history;
 pub mod model;
 pub mod protocol;
 pub mod runner;

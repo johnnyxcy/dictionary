@@ -31,6 +31,7 @@ fn open(view: &mut LookupState, attempt: &Attempt) {
 
 fn progress(attempt: &Attempt) -> Event {
     Event::Progress(Progress {
+        metadata: Default::default(),
         attempt_id: attempt.id.clone(),
         answer: format!("# {}\n\n这是{}的翻译", attempt.input, attempt.input),
         activity: vec![Activity {

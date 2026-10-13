@@ -1,6 +1,79 @@
 use super::*;
 use sha2::{Digest, Sha256};
 
+#[tokio::test]
+async fn searching_and_opening_history_during_work_never_submits_another_attempt() {
+    let mut h = Harness::new();
+    h.lookup(1, "saved history word");
+    let saved = h.opened(1).await;
+    h.release(&saved.input);
+    let saved = h.finished(&saved.id).await;
+    h.lookup(2, "background word");
+    let running = h.opened(2).await;
+    h.streaming(&running.id).await;
+    let started_before = h.spawned().len();
+    let attempts_before: Vec<_> = h.saved().into_iter().map(|attempt| attempt.id).collect();
+    h.send(Command::QueryHistory {
+        request_id: 10,
+        query: HistoryQuery {
+            filter: crate::history::HistoryFilter {
+                search: "HISTORY".into(),
+                ..Default::default()
+            },
+            ..Default::default()
+        },
+    });
+    h.until(|events| {
+        events
+            .iter()
+            .any(|event| matches!(event, Event::HistoryPage { request_id: 10, .. }))
+    })
+    .await;
+    let page = h
+        .seen
+        .iter()
+        .find_map(|event| match event {
+            Event::HistoryPage {
+                request_id: 10,
+                page,
+            } => Some(page),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(page.rows.len(), 1);
+    assert_eq!(page.rows[0].entry.id, saved.id);
+    assert_eq!(page.rows[0].usage, saved.usage);
+    h.send(Command::Open {
+        request_id: 11,
+        attempt_id: saved.id.clone(),
+    });
+    let opened = h.opened(11).await;
+    assert_eq!(opened.id, saved.id);
+    assert_eq!(opened.answer, saved.answer);
+    assert_eq!(opened.usage, saved.usage);
+    h.send(Command::Open {
+        request_id: 12,
+        attempt_id: running.id.clone(),
+    });
+    assert!(
+        h.opened(12).await.status.is_active(),
+        "browsing history must leave other work running"
+    );
+    assert_eq!(h.spawned().len(), started_before);
+    h.send(Command::Cancel(running.id.clone()));
+    assert_eq!(
+        h.finished(&running.id).await.status,
+        AttemptStatus::Cancelled
+    );
+    assert_eq!(
+        h.saved()
+            .into_iter()
+            .map(|attempt| attempt.id)
+            .collect::<Vec<_>>(),
+        attempts_before
+    );
+}
+
 struct Harness {
     service: Option<Service>,
     events: Receiver<Event>,

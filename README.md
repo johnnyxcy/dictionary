@@ -2,7 +2,7 @@
 
 A native macOS learning dictionary built with Rust and GPUI Kit. It runs an independent `codex exec` request with your installed dictionary skill for each lookup and keeps entries and measurements in local SQLite history.
 
-Phases 1–2 implement English ↔ Simplified Chinese lookups, saved entries, and persistent model/effort settings. See the [implementation plan](plans/dictionary-app.md) for searchable history and analysis charts in later phases.
+Phases 1–3 implement English ↔ Simplified Chinese lookups, persistent model/effort settings, and searchable history with restart recovery. See the [implementation plan](plans/dictionary-app.md) for analysis charts and macOS release work in later phases.
 
 ## Run
 
@@ -19,7 +19,7 @@ cargo run --locked
 
 On first launch, the app selects your configured CLI model when available, otherwise the catalog default, and prefers Low effort when supported. Later launches restore your saved settings. The chosen pair appears at the bottom of the sidebar. It reuses CLI authentication and leaves your global CLI configuration unchanged.
 
-Enter text and press **Enter**, or click **Look up**. **Shift+Enter** inserts a newline, and the compact input expands for multiline text. **Command+Enter** also submits. **Command+L** focuses the input and **Command+B** toggles the history sidebar. The result supports selection, scrolling, and the **Copy** icon copies it as Markdown. Up to **three lookups run concurrently**; additional requests wait in a first-in, first-out queue. **Look up** always submits the current input. **Stop**, beside the selected entry’s running status, cancels only that entry (or removes it from the queue before it starts). New Lookup and switching history entries leave other requests running; their completion never changes your selected view. Select an item in History to read its saved result without generating another entry.
+Enter text and press **Enter**, or click **Look up**. **Shift+Enter** inserts a newline, and the compact input expands for multiline text. **Command+Enter** also submits. **Command+L** returns to Dictionary and focuses the input, **Command+F** opens History, and **Command+B** toggles the sidebar. The result supports selection, scrolling, and the **Copy** icon copies it as Markdown. Up to **three lookups run concurrently**; additional requests wait in a first-in, first-out queue. **Look up** always submits the current input. **Stop**, beside the selected entry’s running status, cancels only that entry (or removes it from the queue before it starts). New Lookup and switching history entries leave other requests running; their completion never changes your selected view. Select an item in History to read its saved result without generating another entry.
 
 Searching an expression that is already running or queued in the same translation direction opens that attempt. Otherwise, searching an already saved expression opens its latest successful result, including while all slots are busy or the CLI is unavailable. It makes no model request and adds no attempt or token usage. Matching ignores surrounding whitespace and canonical Unicode differences, but preserves case, punctuation, and internal whitespace. Failed or incomplete attempts never replace a successful cached result. Use **Regenerate**, immediately left of Copy, to request a fresh entry for the selected result's original input and direction using the current configuration. Earlier attempts and their measurements remain in history. Repeated clicks on Look up or Regenerate reuse an active attempt for the same expression and direction.
 
@@ -42,6 +42,14 @@ open 'target/Dictionary Dev.app'
 ```
 
 This is a development bundle. Signing, notarization, and distribution are outside Phase 1.
+
+## Searchable History
+
+Click the **⋯** icon beside the sidebar’s **History** heading (hover for **Show all history**), or press **Command+F**. The dedicated page searches all saved inputs, including entries beyond the recent sidebar. English matching ignores case; English and Chinese use literal substring matching with canonical Unicode normalization. Punctuation such as `%` and `_` is literal. Generated translation text is not searched. This broader browsing search does not change the case-sensitive cache rules for Look up.
+
+Filter by direction and outcome, then move through 25 attempts per page with **Prev** and **Next**. Rows show input, translation or outcome, version, requested model/effort, Fast when recorded, total tokens, response time, and date. Unknown measurements appear as **—**. The footer distinguishes matching attempts from distinct lookups, so regenerated versions remain visible. New requests do not shift the cursor used to fetch older pages.
+
+Open any row to read that exact saved version. **Back to History** retains the search, filters, page, and scroll position. The back arrow beside the History page title returns to your current lookup and input; **New Lookup** starts a fresh input. Background lookups continue, and neither browsing nor opening a row generates another request. Refresh re-reads local history. Deletion uses the same all-versions rule as the recent sidebar, and remains unavailable while any version is queued or running, even when that version is outside the current filter.
 
 ## Local configuration and history
 
@@ -68,7 +76,7 @@ Optional development overrides (model and skill overrides seed the initial prefe
 | `DICTIONARY_SKILL_PATH` | Absolute path to the selected `SKILL.md`; useful if different copies are installed. |
 | `DICTIONARY_DATA_DIR` | Alternate directory for history and the isolated CLI working directory. |
 
-The default database is `~/Library/Application Support/Dictionary/history.sqlite3`. It contains original inputs, Markdown entries, outcomes, immutable request configuration, skill snapshots, reported usage, and timings. The recent list shows the latest 200 attempts; cached searches cover the entire database and reveal older matching entries in the sidebar. Schema version 3 adds persistent settings, a cached catalog, and requested direction while retaining the direction-aware cache index. Older entries keep their English → Chinese direction and original saved payloads. A file lock prevents competing app instances from using the same history. Pending requests left by a previous process become interrupted on startup.
+The default database is `~/Library/Application Support/Dictionary/history.sqlite3`. It contains original inputs, Markdown entries, outcomes, immutable request configuration, skill snapshots, reported usage, and timings. The recent sidebar shows the latest 200 attempts; History and cached lookups cover the entire database. Schema version 4 adds history ordering and outcome indexes, preserving existing attempt payloads, settings, and skill snapshots. Older entries keep their English → Chinese direction. A file lock prevents competing app instances from using the same history.
 
 The prompt reads the selected skill file for every lookup and records its SHA-256 and exact contents. Byte-identical installed copies are collapsed. The input travels as JSON-encoded text through stdin, never through shell interpolation. Each request has fresh context and uses a dedicated CLI process in a read-only sandbox with `--ephemeral` and `--no-daemon`.
 
@@ -82,6 +90,7 @@ New lookups use the service configured in the CLI. Saved entries remain local an
 - The tested CLI emits a completed answer item rather than a token stream. The app shows progress until answer text arrives and also accepts item snapshots when available.
 - Success requires a fully delivered prompt, completed usable answer, terminal success event, and exit code zero. Login errors, process failures, malformed/incomplete output, cancellation, and the three-minute timeout have distinct outcomes.
 - Quitting cancels every running and queued attempt, reaps owned processes, and saves each outcome. Queued cancellations make no model request and have no reported token usage.
+- Live output, reported usage, activity, and available timing metadata are checkpointed while work runs. After an unexpected exit, pending/running attempts become **Interrupted** on restart and retain the last saved checkpoint. Unmeasured final duration and unreported usage stay unavailable. Restart never retries a request automatically.
 - Persistence errors keep the result visible with an explicit saving warning so it can be copied. Requests are never silently retried.
 
 ## Development
@@ -111,7 +120,8 @@ The UI is a thin GPUI layer over a UI-independent library:
 | `store` | Versioned SQLite schema and serialized database work on a dedicated thread. |
 | `service` | Per-key admission, three concurrent CLI tasks, FIFO queue, targeted cancellation, and shutdown. |
 | `view_state` | Per-attempt live state and navigation IDs; background work cannot change the selected result. |
-| `ui` | Native input, Markdown result, recent history, and status/usage display. |
+| `history` | Search filters, cursor pagination, row metadata, and stale-query protection. |
+| `ui` | Native input, Markdown result, recent sidebar, History page, Settings, and per-entry details. |
 
 ```sh
 cargo fmt --all -- --check
@@ -120,7 +130,7 @@ cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo build --locked
 ```
 
-Core tests use an observed CLI fixture and controllable local executables; they make no model requests. They cover split UTF-8/JSONL, repeated events, unknown/missing usage, literal input, durable history, failure after output, authentication errors, cancellation, timeouts, concurrent result isolation, queue advancement, active-key deduplication, shutdown, and stale navigation events. See [Phase 1 validation](docs/phase-1-validation.md) and [Phase 2 validation](docs/phase-2-validation.md).
+Core tests use an observed CLI fixture and controllable local executables; they make no model requests. They cover split UTF-8/JSONL, repeated events, unknown/missing usage, literal input, durable history, failure after output, authentication errors, cancellation, timeouts, concurrent result isolation, queue advancement, active-key deduplication, shutdown, and stale navigation events. History tests cover literal English/Chinese search, stable pagination during writes/deletion, schema migration, and reading results during active work. Recovery tests kill a separate service process and verify saved partial output or reported usage after restart without another request. See [Phase 1 validation](docs/phase-1-validation.md), [Phase 2 validation](docs/phase-2-validation.md), and [Phase 3 validation](docs/phase-3-validation.md).
 
 A headless example exercises the same coordinator and persistence path. It uses a cached result when available; otherwise it makes a real request using your CLI account:
 

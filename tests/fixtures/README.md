@@ -44,3 +44,5 @@ PY
 ```
 
 Use Stop to cancel the selected request. An input of `simulate failure` fails when released. Gates remain on disk, so reuse a fresh data directory for another controlled run. The fixture exits after two minutes if never released. `started-*.json` files record process IDs and original inputs; queued cancellations never produce them. This fixture never calls a model.
+
+The special input `crash after usage fixture` reports a completed answer and usage immediately, then waits for its release file before exiting. Recovery tests use that boundary to kill the service after usage is checkpointed but before the process finishes. A second case kills it during a partial answer with unknown usage. Both restart the service against the same isolated database and verify that opening the recovered entry submits no new inference. Cleanup targets only process groups recorded by the test fixture.

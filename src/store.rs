@@ -15,6 +15,7 @@ use unicode_normalization::UnicodeNormalization;
 use crate::model::{Attempt, AttemptStatus, Failure, HistoryEntry, SkillSnapshot, lookup_key, now};
 use crate::{
     direction::Direction,
+    history::{HistoryCursor, HistoryPage, HistoryQuery, HistoryRow, PAGE_SIZE},
     settings::{Catalog, Preferences},
 };
 
@@ -121,6 +122,10 @@ impl Store {
         self.call(|db| db.history()).await
     }
 
+    pub async fn history_page(&self, query: HistoryQuery) -> Result<HistoryPage> {
+        self.call(move |db| db.history_page(&query)).await
+    }
+
     pub async fn cached(&self, input: String, direction: Direction) -> Result<Option<Attempt>> {
         self.call(move |db| db.cached(&input, direction)).await
     }
@@ -183,7 +188,7 @@ impl Database {
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(
-            version <= 3,
+            version <= 4,
             "This history was created by a newer version of Dictionary"
         );
         if version == 0 {
@@ -211,6 +216,11 @@ impl Database {
         if version < 3 {
             let tx = connection.transaction()?;
             tx.execute_batch(include_str!("../migrations/003_settings.sql"))?;
+            tx.commit()?;
+        }
+        if version < 4 {
+            let tx = connection.transaction()?;
+            tx.execute_batch(include_str!("../migrations/004_history.sql"))?;
             tx.commit()?;
         }
         let mut db = Self {
@@ -314,6 +324,96 @@ impl Database {
                 },
             )
             .collect()
+    }
+
+    pub fn history_page(&self, query: &HistoryQuery) -> Result<HistoryPage> {
+        let search = query.filter.search_key();
+        let direction = query.filter.direction.map(Direction::key);
+        let status = query
+            .filter
+            .status
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?;
+        let status = status.as_ref().and_then(serde_json::Value::as_str);
+        // instr treats %, _, quotes, and backslashes as literal text. Both
+        // sides use the same Unicode normalization as the stored search key.
+        let filter = "FROM attempts a JOIN lookups l ON a.lookup_id=l.id
+            WHERE instr(l.search_key, ?1) > 0
+              AND (?2 IS NULL OR l.direction=?2)
+              AND (?3 IS NULL OR a.state=?3)";
+        let (attempts, lookups) = self.connection.query_row(
+            &format!("SELECT COUNT(*), COUNT(DISTINCT a.lookup_id) {filter}"),
+            params![search, direction, status],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )?;
+        let mut statement = self.connection.prepare(&format!(
+            "SELECT a.id, a.lookup_id, l.input, l.direction, a.created_at, a.state,
+                json_extract(a.payload, '$.answer'), a.attempt_number, a.model, a.effort,
+                json_extract(a.payload, '$.setup.service_tier'), a.input_tokens,
+                a.cached_input_tokens, a.output_tokens, a.reasoning_output_tokens, a.duration_ms,
+                EXISTS(SELECT 1 FROM attempts active WHERE active.lookup_id=a.lookup_id
+                    AND active.state IN ('pending', 'running'))
+             {filter}
+               AND (?4 IS NULL OR (a.created_at, a.id) < (?4, ?5))
+             ORDER BY a.created_at DESC, a.id DESC LIMIT ?6"
+        ))?;
+        let mut records = statement.query(params![
+            search,
+            direction,
+            status,
+            query.before.as_ref().map(|c| &c.created_at),
+            query.before.as_ref().map(|c| &c.id),
+            (PAGE_SIZE + 1) as u64
+        ])?;
+        let mut rows = Vec::new();
+        while let Some(row) = records.next()? {
+            let direction: Direction =
+                serde_json::from_value(serde_json::Value::String(row.get(3)?))?;
+            let answer: String = row.get(6)?;
+            let tier: Option<String> = row.get(10)?;
+            rows.push(HistoryRow {
+                entry: HistoryEntry {
+                    id: row.get(0)?,
+                    lookup_id: row.get(1)?,
+                    input: row.get(2)?,
+                    direction,
+                    created_at: row.get(4)?,
+                    status: serde_json::from_value(serde_json::Value::String(row.get(5)?))?,
+                    translation: crate::model::translation_preview_for(&answer, direction),
+                    generating: !answer.is_empty(),
+                },
+                version: row.get(7)?,
+                model: row.get(8)?,
+                effort: row.get(9)?,
+                tier: tier
+                    .map(|value| serde_json::from_value(serde_json::Value::String(value)))
+                    .transpose()?,
+                usage: crate::model::Usage {
+                    input_tokens: row.get(11)?,
+                    cached_input_tokens: row.get(12)?,
+                    output_tokens: row.get(13)?,
+                    reasoning_output_tokens: row.get(14)?,
+                },
+                duration_ms: row.get(15)?,
+                lookup_active: row.get(16)?,
+            });
+        }
+        let next = if rows.len() > PAGE_SIZE {
+            rows.pop();
+            rows.last().map(|row| HistoryCursor {
+                created_at: row.entry.created_at.clone(),
+                id: row.entry.id.clone(),
+            })
+        } else {
+            None
+        };
+        Ok(HistoryPage {
+            rows,
+            next,
+            attempts,
+            lookups,
+        })
     }
 
     pub fn cached(&self, input: &str, direction: Direction) -> Result<Option<Attempt>> {
