@@ -1,5 +1,6 @@
 //! UI-independent lookup, process, and persistence boundaries.
 
+pub mod analysis;
 pub mod direction;
 pub mod discovery;
 pub mod history;

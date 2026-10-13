@@ -42,14 +42,14 @@ Implement these boundaries as modules within one application, with a UI-independ
 
 - **Dictionary:** compact input that grows for multiline text, Auto / English → 中文 / 中文 → English direction selection, a persistent Look up action, a per-entry Stop control beside running status, and a Markdown result occupying most of the window. Keep recent history in a narrow, collapsible sidebar. Each entry shows input and translation preview; show Thinking / Generating / Failed inline with the preview only when applicable, with its icon aligned to the first text line. Keep token breakdowns, configuration, and timestamps in an entry-details popover. Use labeled or accessible icon controls for common actions. Show available CLI thinking summaries and working events in an expanded live activity section, then automatically collapse it to a reopenable Worked section when complete.
 - **History:** searchable saved queries with direction, date, status, model, effort, tokens, and duration. Opening a result reads SQLite. Retry or regenerate explicitly creates another attempt.
-- **Analysis:** date filters, summary values, and charts. Chart selections can narrow the underlying request list.
+- **Analysis:** date filters, summary values, charts with hover details, and an informational input ranking. Saved entries are browsed in History.
 - **Settings modal:** model picker, Low / Med / High / Max effort control, CLI executable location, selected skill, connection diagnostics, and appearance. Persist app preferences locally.
 
 Searching an expression first opens its running or queued attempt when one exists, otherwise its latest successful cached result, before connection checks and without another attempt or usage. Match NFC-normalized text after trimming surrounding whitespace; preserve case, punctuation, and internal whitespace. Cache lookup covers all saved history. Regenerate, beside Copy, explicitly creates another attempt under the selected lookup using its original input and current settings. Failed regenerations leave the last successful cached result available.
 
 Each newly generated lookup has fresh model context. Previously viewed history is never silently appended to a new request. The first version allows three concurrent CLI processes and persists additional requests in a FIFO queue. Look up always submits the current input; active and queued keys are reserved before admitting another request, so repeated clicks reuse one attempt. Regenerate bypasses saved cache but shares this active-key guard. Stop beside the selected entry’s status cancels only that attempt. Queued cancellation never starts a process. Switching views or choosing New Lookup does not cancel work, and background events never navigate away from the selected entry. Each attempt owns its output, activity, cancellation, usage, and timing. Request IDs discard stale navigation responses.
 
-Use Enter to submit and Shift+Enter to insert a newline; Command+Enter remains a submission shortcut. Use Command+L to return to Dictionary and focus its input, Command+F to open History, Command+B to toggle the sidebar, and Command+, for Settings. Respect Chinese IME composition before handling submission keys. Keep result text selectable and support copying the entry as Markdown.
+Use Enter to submit and Shift+Enter to insert a newline; Command+Enter remains a submission shortcut. Use Command+L to return to Dictionary and focus its input, Command+F to open History, Command+Shift+A to open Analysis, Command+B to toggle the sidebar, and Command+, for Settings. Respect Chinese IME composition before handling submission keys. Keep result text selectable and support copying the entry as Markdown.
 
 Auto direction uses a local script heuristic and exposes the resolved direction before submission. Ambiguous or mixed input requires a direction choice. Preserve the original input, including punctuation and line breaks.
 
@@ -107,7 +107,7 @@ Keep the final response as Markdown, matching the existing skill. A rigid output
 
 | Record | Important fields |
 | --- | --- |
-| Lookup | ID, original input, normalized search key, requested and resolved direction, creation time. Each explicit new search gets its own record, even when text repeats. |
+| Lookup | ID, original input, normalized search key, requested and resolved direction, creation time. Each newly admitted uncached lookup gets a record; cached opens reuse the saved lookup, and regeneration adds an attempt to it. |
 | Attempt | ID, lookup ID, attempt number, retry origin, state, submitted/start/first-answer/end times, measured durations, CLI version, optional thread ID, exit code, error classification, final or partial Markdown. |
 | Attempt configuration | Immutable requested model, optionally reported model, requested effort, skill snapshot ID, direction-instruction version/hash, and relevant execution settings. |
 | Attempt usage | Nullable input, cached input, output, and reasoning output token counts; completeness state and measurement source. Can live on the attempt row. |
@@ -136,12 +136,11 @@ The primary metrics describe this dictionary app's requests. They are not accoun
 | Request frequency | New lookups submitted per hour/day; offer attempts as a separate series so retries remain visible. History views do not count. |
 | Latency distribution | Median, nearest-rank p95, and a histogram for successful attempts by default. Show sample size; failures and cancellations have separate counts and durations. |
 | Reliability | Success, failure, timeout, cancellation, and interruption counts with explicit denominators. Running requests remain distinct. |
-| Comparisons | Tokens and latency by requested model, effort, direction, and input-length bucket. Keep any reported-model view separate and preserve unknown values. |
-| Repeated searches | Most searched inputs and repeat rate, using normalized input plus resolved direction. This is separate from retry count. |
+| Repeated submissions | Most submitted inputs and repeat rate among new lookups, using normalized input plus resolved direction. Cached opens and regenerations do not increase this count. |
 
-The initial Analysis page includes a daily token chart, daily lookup/attempt bars, a latency trend with distribution, outcome counts, and a model/effort comparison table. GPUI Kit's line, area, and bar primitives cover these charts. An hour-by-weekday heatmap is an optional later addition, not a dependency for the first analysis release.
+The initial Analysis page includes a daily token chart, daily lookup/attempt bars, a latency trend with distribution, outcome counts, and an informational input ranking. GPUI Kit's line, area, and bar primitives cover these charts. An hour-by-weekday heatmap is an optional later addition, not a dependency for the first analysis release.
 
-Provide 7-day, 30-day, and custom date ranges, plus model, effort, direction, and outcome filters. Bucket timestamps using one explicit display timezone, fill empty count buckets, and show gaps for unavailable latency or usage. Use weighted cached-input share rather than averaging per-request percentages. Display sample counts beside comparisons and avoid implying effort alone causes latency differences.
+Provide 7-day, 30-day, and custom date ranges, plus model, effort, direction, and outcome filters. Bucket timestamps using one explicit display timezone, fill empty count buckets, and show gaps for unavailable latency or usage. Use weighted cached-input share rather than averaging per-request percentages. Display latency sample counts and the selected outcome population.
 
 Store any usage reported for failed or canceled attempts, but do not fabricate unreported consumption. Deduplicate terminal events and never sum repeated snapshots of the same attempt. Token totals do not establish actual subscription charges; monetary estimates are outside the first version.
 
@@ -221,16 +220,20 @@ Validation evidence and native inspection limits: [Phase 3 validation](../docs/p
 
 ### What to build
 
-Use saved attempts to provide the initial charts, summary values, filters, and model/effort comparison table. Make every plotted aggregate traceable to its underlying attempts. Ship meaningful empty states before the user has enough data for a trend.
+Use saved attempts to provide the initial charts, summary values, filters, and informational input ranking. Keep saved-entry browsing in History. Ship meaningful empty states before the user has enough data for a trend.
+
+Open Analysis from the compact chart icon beside Settings or Command+Shift+A. The user selected the system local timezone, with its IANA name shown next to the date range. Use seven-day, thirty-day, and custom inclusive local dates. The page shares model/effort/direction/outcome filters across its summaries and charts. Daily charts use bars so missing measurements remain gaps. Successful attempts are the default latency population; an explicit outcome filter changes it. Charts expose measurement details on hover. The dashboard does not select or open individual attempts, and changing filters updates the existing charts in place.
 
 ### Acceptance criteria
 
-- [ ] Token, response-time, frequency, and outcome charts use the definitions above and respond to shared filters.
-- [ ] Cached and reasoning tokens are not double-counted. Missing usage displays as unavailable, with coverage visible.
-- [ ] Reopening history leaves request counts unchanged; retries affect attempt counts without inventing new lookups.
-- [ ] Median and p95 show sample sizes and the selected outcome population; incomplete time buckets are identifiable.
-- [ ] Deterministic data tests cover empty ranges, timezone boundaries, missing fields, retries, deletion, and outliers.
-- [ ] A synthetic 10,000-attempt dataset supports responsive filtering and navigation; measured regressions guide indexing or aggregation work.
+- [x] Token, response-time, frequency, and outcome charts use the definitions above and respond to shared filters.
+- [x] Cached and reasoning tokens are not double-counted. Missing usage displays as unavailable, with coverage visible.
+- [x] Reopening history leaves request counts unchanged; retries affect attempt counts without inventing new lookups.
+- [x] Median and p95 show sample sizes and the selected outcome population; incomplete time buckets are identifiable.
+- [x] Deterministic data tests cover empty ranges, timezone boundaries, missing fields, retries, deletion, and outliers.
+- [x] A synthetic 10,000-attempt dataset supports responsive filtering; measured regressions guide indexing or aggregation work.
+
+Validation evidence: [Phase 4 validation](../docs/phase-4-validation.md).
 
 ## Phase 5: macOS release readiness
 

@@ -2,6 +2,78 @@ use super::*;
 use sha2::{Digest, Sha256};
 
 #[tokio::test]
+async fn analysis_during_work_is_read_only_and_refreshes_after_completion_and_deletion() {
+    let mut h = Harness::new();
+    h.lookup(1, "analysis saved word");
+    let saved = h.opened(1).await;
+    h.release(&saved.input);
+    let saved = h.finished(&saved.id).await;
+    h.lookup(2, "analysis background word");
+    let running = h.opened(2).await;
+    h.streaming(&running.id).await;
+    let spawned = h.spawned().len();
+    let today = chrono::Utc::now().date_naive();
+    for request_id in 10..=12 {
+        h.send(Command::QueryAnalysis {
+            request_id,
+            query: crate::analysis::AnalysisQuery {
+                range: crate::analysis::DateRange::recent(7, today),
+                timezone: chrono_tz::UTC,
+                filter: Default::default(),
+                as_of: chrono::Utc::now(),
+            },
+        });
+        h.until(|events| events.iter().any(|event| matches!(event, Event::Analysis { request_id: id, .. } if *id == request_id))).await;
+        let report = h
+            .seen
+            .iter()
+            .find_map(|event| match event {
+                Event::Analysis {
+                    request_id: id,
+                    report,
+                } if *id == request_id => Some(report),
+                _ => None,
+            })
+            .unwrap();
+        if request_id == 10 {
+            assert_eq!(report.summary.attempts, 2);
+            assert_eq!(
+                report.summary.tokens.subtotal(),
+                saved.usage.total().map(u128::from)
+            );
+            assert!(report.active_usage.contains_key(&running.id));
+            assert!(!report.active_usage.contains_key(&saved.id));
+            h.send(Command::Cancel(running.id.clone()));
+            h.finished(&running.id).await;
+        } else if request_id == 11 {
+            assert!(report.active_usage.is_empty());
+            assert_eq!(
+                report
+                    .outcomes
+                    .iter()
+                    .find(|outcome| outcome.status == AttemptStatus::Cancelled)
+                    .unwrap()
+                    .metrics
+                    .attempts,
+                1
+            );
+            h.send(Command::DeleteLookup(saved.lookup_id.clone()));
+            h.until(|events| {
+                events.iter().any(
+                    |event| matches!(event, Event::DeletedLookup(id) if *id == saved.lookup_id),
+                )
+            })
+            .await;
+        } else {
+            assert_eq!(report.summary.attempts, 1);
+            assert_eq!(report.top_inputs[0].input, running.input);
+            assert_eq!(report.summary.tokens.subtotal(), None);
+        }
+    }
+    assert_eq!(h.spawned().len(), spawned);
+}
+
+#[tokio::test]
 async fn searching_and_opening_history_during_work_never_submits_another_attempt() {
     let mut h = Harness::new();
     h.lookup(1, "saved history word");

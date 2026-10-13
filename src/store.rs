@@ -14,6 +14,7 @@ use unicode_normalization::UnicodeNormalization;
 
 use crate::model::{Attempt, AttemptStatus, Failure, HistoryEntry, SkillSnapshot, lookup_key, now};
 use crate::{
+    analysis::{AnalysisQuery, AnalysisRecord, AnalysisReport},
     direction::Direction,
     history::{HistoryCursor, HistoryPage, HistoryQuery, HistoryRow, PAGE_SIZE},
     settings::{Catalog, Preferences},
@@ -124,6 +125,10 @@ impl Store {
 
     pub async fn history_page(&self, query: HistoryQuery) -> Result<HistoryPage> {
         self.call(move |db| db.history_page(&query)).await
+    }
+
+    pub async fn analysis(&self, query: AnalysisQuery) -> Result<AnalysisReport> {
+        self.call(move |db| db.analysis(query)).await
     }
 
     pub async fn cached(&self, input: String, direction: Direction) -> Result<Option<Attempt>> {
@@ -430,6 +435,75 @@ impl Database {
             .optional()?;
         json.map(|json| serde_json::from_str(&json).context("Cannot read the cached lookup"))
             .transpose()
+    }
+
+    pub fn analysis(&self, query: AnalysisQuery) -> Result<AnalysisReport> {
+        let (start, end) = query.range.bounds(query.timezone)?;
+        let status = query
+            .filter
+            .status
+            .as_ref()
+            .map(serde_json::to_value)
+            .transpose()?;
+        // SQLite converts RFC3339 to instants, so fractional seconds and legacy
+        // UTC spellings have identical boundary semantics. Project measurements
+        // only; never deserialize full answers or skill snapshots for charts.
+        let mut statement = self.connection.prepare(
+            "SELECT a.id, a.attempt_number, l.input, l.direction,
+                a.created_at, a.state,
+                a.input_tokens, a.cached_input_tokens, a.output_tokens, a.reasoning_output_tokens,
+                a.duration_ms, json_extract(a.payload, '$.first_answer_ms'),
+                json_extract(a.payload, '$.queue_duration_ms'), json_extract(a.payload, '$.cli_duration_ms')
+             FROM attempts a JOIN lookups l ON l.id=a.lookup_id
+             WHERE julianday(a.created_at) >= julianday(?1)
+               AND julianday(a.created_at) < julianday(?2)
+               AND julianday(a.created_at) <= julianday(?3)
+               AND (?4 IS NULL OR a.model=?4) AND (?5 IS NULL OR a.effort=?5)
+               AND (?6 IS NULL OR l.direction=?6) AND (?7 IS NULL OR a.state=?7)
+             ORDER BY a.created_at DESC, a.id DESC")?;
+        let mut rows = statement.query(params![
+            start.to_rfc3339(),
+            end.to_rfc3339(),
+            query.as_of.to_rfc3339(),
+            query.filter.model,
+            query.filter.effort,
+            query.filter.direction.map(Direction::key),
+            status.as_ref().and_then(serde_json::Value::as_str)
+        ])?;
+        let mut records = Vec::new();
+        while let Some(row) = rows.next()? {
+            let created: String = row.get(4)?;
+            records.push(AnalysisRecord {
+                id: row.get(0)?,
+                version: row.get(1)?,
+                input: row.get(2)?,
+                direction: serde_json::from_value(serde_json::Value::String(row.get(3)?))?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created)?
+                    .with_timezone(&chrono::Utc),
+                status: serde_json::from_value(serde_json::Value::String(row.get(5)?))?,
+                usage: crate::model::Usage {
+                    input_tokens: row.get(6)?,
+                    cached_input_tokens: row.get(7)?,
+                    output_tokens: row.get(8)?,
+                    reasoning_output_tokens: row.get(9)?,
+                },
+                duration_ms: row.get(10)?,
+                first_answer_ms: row.get(11)?,
+                queue_duration_ms: row.get(12)?,
+                cli_duration_ms: row.get(13)?,
+            });
+        }
+        let models = self
+            .connection
+            .prepare("SELECT DISTINCT model FROM attempts ORDER BY model")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        let efforts = self
+            .connection
+            .prepare("SELECT DISTINCT effort FROM attempts ORDER BY effort")?
+            .query_map([], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        AnalysisReport::build(query, records, models, efforts)
     }
 
     /// Delete the lookup and every version together. The cascade also removes

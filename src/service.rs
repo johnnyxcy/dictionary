@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
+    sync::Arc,
     thread::JoinHandle,
     time::{Duration, Instant},
 };
@@ -13,6 +14,7 @@ use tokio::{
 };
 
 use crate::{
+    analysis::{AnalysisQuery, AnalysisReport},
     direction::{Direction, DirectionChoice},
     discovery::{self, AppPaths},
     history::{HistoryPage, HistoryQuery},
@@ -29,6 +31,10 @@ pub const MAX_CONCURRENT_LOOKUPS: usize = 3;
 pub type RequestId = u64;
 
 pub enum Command {
+    QueryAnalysis {
+        request_id: RequestId,
+        query: AnalysisQuery,
+    },
     QueryHistory {
         request_id: RequestId,
         query: HistoryQuery,
@@ -54,6 +60,14 @@ pub enum Command {
 
 #[derive(Clone, Debug)]
 pub enum Event {
+    Analysis {
+        request_id: RequestId,
+        report: Arc<AnalysisReport>,
+    },
+    AnalysisFailed {
+        request_id: RequestId,
+        message: String,
+    },
     History(Vec<HistoryEntry>),
     HistoryPage {
         request_id: RequestId,
@@ -510,6 +524,13 @@ async fn work(
             command = commands.recv() => {
                 let Ok(command) = command else { break; };
                 let (request_id, result) = match command {
+                    Command::QueryAnalysis { request_id, query } => {
+                        match coordinator.store.analysis(query).await {
+                            Ok(report) => { events.send(Event::Analysis { request_id, report: Arc::new(report) }).await.ok(); }
+                            Err(error) => { events.send(Event::AnalysisFailed { request_id, message: format!("Cannot load analysis: {error:#}") }).await.ok(); }
+                        }
+                        continue;
+                    }
                     Command::QueryHistory { request_id, query } => {
                         match coordinator.store.history_page(query).await {
                             Ok(page) => { events.send(Event::HistoryPage { request_id, page }).await.ok(); }

@@ -1,5 +1,8 @@
+mod analysis;
+mod formatting;
 mod history;
 mod settings;
+use analysis::{AnalysisEvent, AnalysisView};
 use history::{HistoryEvent, HistoryView};
 use settings::{PickerItem, SettingsEvent, SettingsView};
 
@@ -14,7 +17,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::{
     component::{
-        ActiveTheme, Disableable, Icon, Sizable, WindowExt,
+        ActiveTheme, Disableable, Icon, Selectable, Sizable, WindowExt,
         button::{Button, ButtonVariants},
         input::{Textarea, TextareaState},
         notification::{Notification, NotificationList},
@@ -23,16 +26,31 @@ use gpui_kit::{
         skeleton::Skeleton,
         spinner::Spinner,
         text::TextView,
+        tooltip::Tooltip,
     },
     *,
 };
 
 actions!(
     dictionary,
-    [FocusLookup, FocusHistory, ToggleSidebar, OpenSettings, Quit]
+    [
+        FocusLookup,
+        FocusHistory,
+        FocusAnalysis,
+        ToggleSidebar,
+        OpenSettings,
+        Quit
+    ]
 );
 
 struct SettingsNotification;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Page {
+    Dictionary,
+    History,
+    Analysis,
+}
 
 pub struct DictionaryView {
     input: Entity<TextareaState>,
@@ -50,9 +68,11 @@ pub struct DictionaryView {
     notice: Option<String>,
     lookups: LookupState,
     history_view: Entity<HistoryView>,
-    history_visible: bool,
+    analysis_view: Entity<AnalysisView>,
+    page: Page,
     return_to_history: bool,
     _history_subscription: Subscription,
+    _analysis_subscription: Subscription,
     deleting: Option<String>,
     activity_scroll: ScrollHandle,
     history_scroll: ScrollHandle,
@@ -117,6 +137,22 @@ impl DictionaryView {
                 HistoryEvent::Back => this.show_dictionary(window, cx),
             },
         );
+        let analysis_view = cx.new(|cx| AnalysisView::new(window, cx));
+        let analysis_subscription = cx.subscribe_in(
+            &analysis_view,
+            window,
+            |this: &mut Self, view, event, window, cx| match event {
+                AnalysisEvent::Query { request_id, query } => {
+                    if let Err(error) = this.dispatch(Command::QueryAnalysis {
+                        request_id: *request_id,
+                        query: query.clone(),
+                    }) {
+                        view.update(cx, |view, cx| view.fail(*request_id, error, cx));
+                    }
+                }
+                AnalysisEvent::Back => this.show_dictionary(window, cx),
+            },
+        );
         let task = cx.spawn_in(window, async move |view, cx| {
             while let Ok(event) = events.recv().await {
                 if cx
@@ -154,9 +190,11 @@ impl DictionaryView {
             notice: None,
             lookups: LookupState::default(),
             history_view,
-            history_visible: false,
+            analysis_view,
+            page: Page::Dictionary,
             return_to_history: false,
             _history_subscription: history_subscription,
+            _analysis_subscription: analysis_subscription,
             deleting: None,
             activity_scroll: ScrollHandle::new(),
             history_scroll: ScrollHandle::new(),
@@ -247,9 +285,12 @@ impl DictionaryView {
         self.lookups.receive(&event);
         self.history_view
             .update(cx, |view, cx| view.receive(&event, cx));
+        self.analysis_view
+            .update(cx, |view, cx| view.receive(&event, window, cx));
         if navigation {
-            self.history_visible = false;
+            self.page = Page::Dictionary;
             self.history_view.update(cx, |view, _| view.hide());
+            self.analysis_view.update(cx, |view, _| view.hide());
             if let Some(index) = self.lookups.history.iter().position(|entry| {
                 self.lookups
                     .selected
@@ -366,9 +407,10 @@ impl DictionaryView {
     }
 
     fn new_lookup(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.history_visible = false;
+        self.page = Page::Dictionary;
         self.return_to_history = false;
         self.history_view.update(cx, |view, _| view.hide());
+        self.analysis_view.update(cx, |view, _| view.hide());
         self.lookups.new_lookup();
         self.notice = None;
         self.input.update(cx, |input, cx| {
@@ -396,17 +438,35 @@ impl DictionaryView {
 
     fn open_history(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.lookups.begin_navigation();
-        self.history_visible = true;
+        self.page = Page::History;
+        self.analysis_view.update(cx, |view, _| view.hide());
         self.notice = None;
         self.history_view
             .update(cx, |view, cx| view.show(window, cx));
         cx.notify();
     }
 
+    fn open_analysis(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.lookups.begin_navigation();
+        self.page = Page::Analysis;
+        self.notice = None;
+        self.history_view.update(cx, |view, _| view.hide());
+        self.analysis_view
+            .update(cx, |view, cx| view.show(window, cx));
+        cx.notify();
+    }
+
+    fn analysis_button(&self, cx: &Context<Self>) -> Button {
+        icon_button("open-analysis", IconName::ChartColumn, "Analysis (⌘⇧A)")
+            .selected(self.page == Page::Analysis)
+            .on_click(cx.listener(|this, _, window, cx| this.open_analysis(window, cx)))
+    }
+
     fn show_dictionary(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.lookups.begin_navigation();
-        self.history_visible = false;
+        self.page = Page::Dictionary;
         self.history_view.update(cx, |view, _| view.hide());
+        self.analysis_view.update(cx, |view, _| view.hide());
         self.input.update(cx, |input, cx| input.focus(window, cx));
         cx.notify();
     }
@@ -669,7 +729,7 @@ impl DictionaryView {
                             .mb_1()
                             .rounded_md()
                             .when(
-                                !self.history_visible && selected == Some(&entry.id),
+                                self.page == Page::Dictionary && selected == Some(&entry.id),
                                 |this| this.bg(theme.accent),
                             )
                             .hover(|this| this.bg(theme.accent))
@@ -783,6 +843,7 @@ impl DictionaryView {
                             .truncate()
                             .child(self.configuration()),
                     )
+                    .child(self.analysis_button(cx))
                     .child(self.settings_button(cx)),
             )
             .into_any_element()
@@ -850,6 +911,7 @@ impl DictionaryView {
                     icon_button("open-history", IconName::ClockArrowLeft, "History (⌘F)")
                         .on_click(cx.listener(|this, _, window, cx| this.open_history(window, cx))),
                 )
+                .child(self.analysis_button(cx))
                 .child(self.settings_button(cx))
             })
             .into_any_element()
@@ -865,11 +927,26 @@ impl DictionaryView {
                     attempt.status.label().into()
                 },
             ),
-            ("Total tokens", number(attempt.usage.total())),
-            ("Input", number(attempt.usage.input_tokens)),
-            ("Cached input", number(attempt.usage.cached_input_tokens)),
-            ("Output", number(attempt.usage.output_tokens)),
-            ("Reasoning", number(attempt.usage.reasoning_output_tokens)),
+            (
+                "Total tokens",
+                formatting::exact_count(attempt.usage.total().map(u128::from)),
+            ),
+            (
+                "Input",
+                formatting::exact_count(attempt.usage.input_tokens.map(u128::from)),
+            ),
+            (
+                "Cached input",
+                formatting::exact_count(attempt.usage.cached_input_tokens.map(u128::from)),
+            ),
+            (
+                "Output",
+                formatting::exact_count(attempt.usage.output_tokens.map(u128::from)),
+            ),
+            (
+                "Reasoning",
+                formatting::exact_count(attempt.usage.reasoning_output_tokens.map(u128::from)),
+            ),
             ("Response time", duration(attempt.duration_ms)),
             ("Queue wait", duration(attempt.queue_duration_ms)),
             ("CLI runtime", duration(attempt.cli_duration_ms)),
@@ -1049,13 +1126,11 @@ impl DictionaryView {
                             .gap_1()
                             .text_xs()
                             .child(Icon::new(IconName::Zap).xsmall())
-                            .child(
-                                attempt
-                                    .usage
-                                    .total()
-                                    .map(|tokens| format!("{tokens} tokens"))
-                                    .unwrap_or_else(|| "— tokens".into()),
-                            ),
+                            .child(token_count(
+                                "entry-total-tokens",
+                                attempt.usage.total().map(u128::from),
+                            ))
+                            .child("tokens"),
                     )
                     .child(
                         icon_button("regenerate", IconName::RotateCcw, "Regenerate")
@@ -1311,7 +1386,7 @@ impl Render for DictionaryView {
             // The textarea handles Shift+Enter and propagates submit actions.
             .on_action(cx.listener(
                 |this, action: &gpui_kit::component::input::Enter, window, cx| {
-                    if !this.history_visible && !action.shift {
+                    if this.page == Page::Dictionary && !action.shift {
                         let composing = this.input.update(cx, |input, cx| {
                             input.marked_text_range(window, cx).is_some()
                         });
@@ -1329,6 +1404,9 @@ impl Render for DictionaryView {
                 cx.listener(|this, _: &FocusHistory, window, cx| this.open_history(window, cx)),
             )
             .on_action(
+                cx.listener(|this, _: &FocusAnalysis, window, cx| this.open_analysis(window, cx)),
+            )
+            .on_action(
                 cx.listener(|this, _: &OpenSettings, window, cx| this.open_settings(window, cx)),
             )
             .on_action(cx.listener(|this, _: &ToggleSidebar, _, cx| {
@@ -1343,35 +1421,41 @@ impl Render for DictionaryView {
                     .flex_1()
                     .min_w_0()
                     .h_full()
-                    .when(!self.history_visible, |this| {
+                    .when(self.page == Page::Dictionary, |this| {
                         this.child(self.search_bar(cx))
                     })
-                    .when(self.history_visible && !self.sidebar_visible, |this| {
-                        this.child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap_2()
-                                .px_4()
-                                .pt_3()
-                                .child(
-                                    icon_button(
-                                        "show-history-sidebar",
-                                        IconName::PanelLeft,
-                                        "Show sidebar",
+                    .when(
+                        self.page != Page::Dictionary && !self.sidebar_visible,
+                        |this| {
+                            this.child(
+                                div()
+                                    .flex()
+                                    .items_center()
+                                    .gap_2()
+                                    .px_4()
+                                    .pt_3()
+                                    .child(
+                                        icon_button(
+                                            "show-history-sidebar",
+                                            IconName::PanelLeft,
+                                            "Show sidebar",
+                                        )
+                                        .on_click(
+                                            cx.listener(|this, _, _, cx| {
+                                                this.sidebar_visible = true;
+                                                cx.notify();
+                                            }),
+                                        ),
                                     )
-                                    .on_click(cx.listener(
-                                        |this, _, _, cx| {
-                                            this.sidebar_visible = true;
-                                            cx.notify();
-                                        },
-                                    )),
-                                )
-                                .child(self.new_lookup_button(cx)),
-                        )
-                    })
+                                    .child(self.new_lookup_button(cx))
+                                    .child(self.analysis_button(cx)),
+                            )
+                        },
+                    )
                     .when_some(
-                        self.setup_error.clone().filter(|_| !self.history_visible),
+                        self.setup_error
+                            .clone()
+                            .filter(|_| self.page == Page::Dictionary),
                         |this, message| {
                             this.child(div().px_6().pt_2().child(message_box(
                                 message,
@@ -1387,10 +1471,10 @@ impl Render for DictionaryView {
                             theme.border,
                         )))
                     })
-                    .child(if self.history_visible {
-                        self.history_view.clone().into_any_element()
-                    } else {
-                        self.response(cx)
+                    .child(match self.page {
+                        Page::History => self.history_view.clone().into_any_element(),
+                        Page::Analysis => self.analysis_view.clone().into_any_element(),
+                        Page::Dictionary => self.response(cx),
                     }),
             )
             .child(self.notification_layer(window))
@@ -1424,8 +1508,19 @@ fn message_box(message: String, color: Hsla, border: Hsla) -> impl IntoElement {
         .child(div().min_w_0().flex_1().child(message))
 }
 
-fn number(value: Option<u64>) -> String {
-    value.map(|v| v.to_string()).unwrap_or_else(|| "—".into())
+fn token_count(id: impl Into<ElementId>, value: Option<u128>) -> Stateful<Div> {
+    let exact = if value.is_some() {
+        format!("{} tokens", formatting::exact_count(value))
+    } else {
+        "Token usage unavailable".into()
+    };
+    div()
+        .id(id)
+        .role(Role::Label)
+        .aria_label(exact.clone())
+        .whitespace_nowrap()
+        .child(formatting::compact_count(value))
+        .tooltip(move |window, cx| Tooltip::new(exact.clone()).build(window, cx))
 }
 
 fn duration(value: Option<u64>) -> String {

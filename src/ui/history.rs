@@ -376,7 +376,16 @@ impl HistoryView {
                         }
                     ))),
             )
-            .child(cell(super::number(row.usage.total()), 72., cx))
+            .child(
+                super::token_count(
+                    SharedString::from(format!("history-tokens-{}", entry.id)),
+                    row.usage.total().map(u128::from),
+                )
+                .w(px(72.))
+                .flex_shrink_0()
+                .text_xs()
+                .text_color(theme.muted_foreground),
+            )
             .child(cell(super::duration(row.duration_ms), 64., cx))
             .child(cell(history_date(&entry.created_at), 76., cx))
             .child(
