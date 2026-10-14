@@ -10,17 +10,20 @@ use anyhow::{Context, Result, anyhow, ensure};
 use async_channel::Sender;
 use fs2::FileExt;
 use rusqlite::{Connection, OptionalExtension, params};
-use unicode_normalization::UnicodeNormalization;
 
 use crate::model::{Attempt, AttemptStatus, Failure, HistoryEntry, SkillSnapshot, lookup_key, now};
 use crate::{
     analysis::{AnalysisQuery, AnalysisRecord, AnalysisReport},
     direction::Direction,
-    history::{HistoryCursor, HistoryPage, HistoryQuery, HistoryRow, PAGE_SIZE},
+    history::{
+        HistoryCursor, HistoryPage, HistoryQuery, HistoryRow, PAGE_SIZE, normalize_search_text,
+    },
     settings::{Catalog, Preferences},
 };
 
 type Job = Box<dyn FnOnce(&mut Database) + Send>;
+
+const SCHEMA_VERSION: i64 = 5;
 
 /// One connection and one file lock, both owned by a dedicated database thread.
 #[derive(Clone)]
@@ -192,11 +195,11 @@ impl Database {
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         let version: i64 = connection.query_row("PRAGMA user_version", [], |r| r.get(0))?;
         ensure!(
-            version <= 4,
+            version <= SCHEMA_VERSION,
             "This history was created by a newer version of JDict"
         );
         connection.execute_batch("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;")?;
-        if version < 4 {
+        if version < SCHEMA_VERSION {
             let has_data: bool = connection.query_row(
                 "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table')",
                 [],
@@ -245,7 +248,7 @@ impl Database {
         tx.execute("INSERT OR IGNORE INTO skill_snapshots(hash, name, source, content) VALUES (?1, ?2, ?3, ?4)",
             params![skill.hash, skill.name, skill.path.to_string_lossy(), skill.content])?;
         tx.execute("INSERT INTO lookups(id, input, search_key, direction, created_at, cache_key, requested_direction) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7) ON CONFLICT(id) DO NOTHING",
-            params![attempt.lookup_id, attempt.input, attempt.input.nfc().collect::<String>().to_lowercase(), attempt.direction.key(), attempt.created_at, lookup_key(&attempt.input), serde_json::to_value(attempt.requested_direction)?.as_str()])?;
+            params![attempt.lookup_id, attempt.input, normalize_search_text(&attempt.input), attempt.direction.key(), attempt.created_at, lookup_key(&attempt.input), serde_json::to_value(attempt.requested_direction)?.as_str()])?;
         let original: (String, String) = tx.query_row(
             "SELECT input, direction FROM lookups WHERE id=?1",
             [&attempt.lookup_id],
@@ -255,8 +258,8 @@ impl Database {
             original.0 == attempt.input && original.1 == attempt.direction.key(),
             "A regenerated attempt must preserve the original input and direction"
         );
-        tx.execute("INSERT INTO attempts(id, lookup_id, attempt_number, state, created_at, model, effort, skill_hash, payload) VALUES (?1, ?2, (SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM attempts WHERE lookup_id=?2), 'pending', ?3, ?4, ?5, ?6, ?7)",
-            params![attempt.id, attempt.lookup_id, attempt.created_at, attempt.setup.model, attempt.setup.effort, attempt.skill_hash, serde_json::to_string(attempt)?])?;
+        tx.execute("INSERT INTO attempts(id, lookup_id, attempt_number, state, created_at, model, effort, skill_hash, payload, answer_search_key) VALUES (?1, ?2, (SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM attempts WHERE lookup_id=?2), 'pending', ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![attempt.id, attempt.lookup_id, attempt.created_at, attempt.setup.model, attempt.setup.effort, attempt.skill_hash, serde_json::to_string(attempt)?, normalize_search_text(&attempt.answer)])?;
         tx.commit()?;
         Ok(())
     }
@@ -265,9 +268,9 @@ impl Database {
         attempt.usage.validate()?;
         let state = serde_json::to_value(&attempt.status)?;
         let changed = self.connection.execute(
-            "UPDATE attempts SET state=?2, input_tokens=?3, cached_input_tokens=?4, output_tokens=?5, reasoning_output_tokens=?6, duration_ms=?7, payload=?8 WHERE id=?1",
+            "UPDATE attempts SET state=?2, input_tokens=?3, cached_input_tokens=?4, output_tokens=?5, reasoning_output_tokens=?6, duration_ms=?7, payload=?8, answer_search_key=?9 WHERE id=?1",
             params![attempt.id, state.as_str(), attempt.usage.input_tokens, attempt.usage.cached_input_tokens,
-                attempt.usage.output_tokens, attempt.usage.reasoning_output_tokens, attempt.duration_ms, serde_json::to_string(attempt)?])?;
+                attempt.usage.output_tokens, attempt.usage.reasoning_output_tokens, attempt.duration_ms, serde_json::to_string(attempt)?, normalize_search_text(&attempt.answer)])?;
         ensure!(changed == 1, "The lookup no longer exists in history");
         Ok(())
     }
@@ -330,9 +333,9 @@ impl Database {
             .transpose()?;
         let status = status.as_ref().and_then(serde_json::Value::as_str);
         // instr treats %, _, quotes, and backslashes as literal text. Both
-        // sides use the same Unicode normalization as the stored search key.
+        // inputs and answers use the same Unicode normalization as the query.
         let filter = "FROM attempts a JOIN lookups l ON a.lookup_id=l.id
-            WHERE instr(l.search_key, ?1) > 0
+            WHERE (instr(l.search_key, ?1) > 0 OR instr(a.answer_search_key, ?1) > 0)
               AND (?2 IS NULL OR l.direction=?2)
               AND (?3 IS NULL OR a.state=?3)";
         let (attempts, lookups) = self.connection.query_row(
@@ -567,6 +570,25 @@ fn migrate(connection: &mut Connection, version: i64) -> Result<()> {
     }
     if version < 4 {
         tx.execute_batch(include_str!("../migrations/004_history.sql"))?;
+    }
+    if version < 5 {
+        tx.execute_batch(include_str!("../migrations/005_translation_search.sql"))?;
+        let ids = {
+            let mut statement = tx.prepare("SELECT id FROM attempts")?;
+            statement
+                .query_map([], |r| r.get::<_, String>(0))?
+                .collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        // Normalize one answer at a time without loading all saved prose or
+        // rewriting the immutable attempt payloads.
+        let mut answers = tx.prepare(
+            "SELECT COALESCE(json_extract(payload, '$.answer'), '') FROM attempts WHERE id=?1",
+        )?;
+        let mut update = tx.prepare("UPDATE attempts SET answer_search_key=?2 WHERE id=?1")?;
+        for id in ids {
+            let answer: String = answers.query_row([&id], |r| r.get(0))?;
+            update.execute(params![id, normalize_search_text(&answer)])?;
+        }
     }
     tx.commit()?;
     Ok(())

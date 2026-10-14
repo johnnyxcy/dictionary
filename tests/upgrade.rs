@@ -59,7 +59,7 @@ fn a_failed_later_migration_rolls_back_the_whole_upgrade_and_keeps_a_wal_aware_b
             .unwrap()
             .query_row("PRAGMA user_version", [], |r| r.get::<_, i64>(0))
             .unwrap(),
-        4
+        5
     );
 }
 

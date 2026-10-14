@@ -8,6 +8,11 @@ use crate::{
 
 pub const PAGE_SIZE: usize = 25;
 
+/// Shared by saved inputs, saved answers, and the user's search query.
+pub(crate) fn normalize_search_text(text: &str) -> String {
+    text.nfc().collect::<String>().to_lowercase()
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct HistoryFilter {
     pub search: String,
@@ -17,7 +22,7 @@ pub struct HistoryFilter {
 
 impl HistoryFilter {
     pub fn search_key(&self) -> String {
-        self.search.trim().nfc().collect::<String>().to_lowercase()
+        normalize_search_text(self.search.trim())
     }
 
     pub fn is_empty(&self) -> bool {

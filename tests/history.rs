@@ -80,11 +80,13 @@ fn row_ids(page: &HistoryPage) -> HashSet<String> {
 #[test]
 fn substring_search_is_literal_unicode_normalized_and_covers_all_saved_inputs() {
     let mut f = Fixture::new();
-    let old = f.insert(
+    let mut old = f.insert(
         "A café by the sea",
         Direction::EnZh,
         AttemptStatus::Succeeded,
     );
+    old.answer = "# A café by the sea\n\n海边的咖啡馆".into();
+    f.db.save(&old).unwrap();
     for i in 0..210 {
         f.insert(
             &format!("recent word {i}"),
@@ -110,18 +112,95 @@ fn substring_search_is_literal_unicode_normalized_and_covers_all_saved_inputs() 
     assert!(!f.db.history().unwrap().iter().any(|row| row.id == old.id));
     assert_eq!(
         row_ids(&f.search("  CAFE\u{301} ")),
-        HashSet::from([old.id])
+        HashSet::from([old.id.clone()])
     );
+    assert_eq!(row_ids(&f.search("咖啡馆")), HashSet::from([old.id]));
     assert_eq!(row_ids(&f.search("从容")), HashSet::from([chinese.id]));
     assert_eq!(
         row_ids(&f.search("%_literal\\ 'quoted'")),
         HashSet::from([literal.id])
     );
     assert!(f.search("' OR 1=1 --").rows.is_empty());
-    assert!(
-        f.search("中文释义").rows.is_empty(),
-        "search targets original inputs, not generated prose"
+}
+
+#[test]
+fn translated_keywords_match_full_answers_in_both_directions() {
+    let mut f = Fixture::new();
+    let mut english = f.insert("break the ice", Direction::EnZh, AttemptStatus::Succeeded);
+    english.answer = "# break the ice\n\n打破沉默\n\n也指缓和气氛，让人放松。".into();
+    f.db.save(&english).unwrap();
+    let mut chinese = f.insert("从容", Direction::ZhEn, AttemptStatus::Succeeded);
+    chinese.answer = "# 从容\n\nStay CALM at the cafe\u{301}.\n\n100%_literal\\ 'quoted'".into();
+    f.db.save(&chinese).unwrap();
+
+    for keyword in ["打破沉默", "缓和气氛", "BREAK THE ICE"] {
+        let page = f.search(keyword);
+        assert_eq!(row_ids(&page), HashSet::from([english.id.clone()]));
+        assert_eq!((page.attempts, page.lookups), (1, 1));
+        assert_eq!(page.rows[0].entry.translation, "打破沉默");
+    }
+    for keyword in ["calm", "  CAFÉ  ", "CAFE\u{301}", "%_literal\\ 'quoted'"] {
+        assert_eq!(
+            row_ids(&f.search(keyword)),
+            HashSet::from([chinese.id.clone()])
+        );
+    }
+    assert!(f.search("' OR 1=1 --").rows.is_empty());
+    assert!(f.search("unrelated").rows.is_empty());
+}
+
+#[test]
+fn translation_search_tracks_each_versions_saved_answer_and_respects_filters() {
+    let mut f = Fixture::new();
+    let mut original = f.insert("bank", Direction::EnZh, AttemptStatus::Succeeded);
+    original.answer = "河岸".into();
+    f.db.save(&original).unwrap();
+    let mut retry = Attempt::new(
+        original.input.clone(),
+        f.setup.clone(),
+        f.skill.hash.clone(),
     );
+    retry.lookup_id = original.lookup_id.clone();
+    retry.answer = "银行".into();
+    f.db.insert(&retry, &f.skill).unwrap();
+    let mut chinese = f.insert("银行", Direction::ZhEn, AttemptStatus::Succeeded);
+    chinese.answer = "bank".into();
+    f.db.save(&chinese).unwrap();
+
+    assert_eq!(
+        row_ids(&f.search("河岸")),
+        HashSet::from([original.id.clone()])
+    );
+    let page = f.search("bank");
+    assert_eq!(
+        row_ids(&page),
+        HashSet::from([original.id, retry.id.clone(), chinese.id.clone()])
+    );
+    assert_eq!((page.attempts, page.lookups), (3, 2));
+    let query = HistoryQuery {
+        filter: HistoryFilter {
+            search: "银行".into(),
+            direction: Some(Direction::EnZh),
+            status: Some(AttemptStatus::Pending),
+        },
+        ..Default::default()
+    };
+    let page = f.db.history_page(&query).unwrap();
+    assert_eq!(row_ids(&page), HashSet::from([retry.id.clone()]));
+    assert_eq!((page.attempts, page.lookups), (1, 1));
+
+    retry.answer = "河堤".into();
+    retry.status = AttemptStatus::Failed;
+    f.db.save(&retry).unwrap();
+    assert!(f.db.history_page(&query).unwrap().rows.is_empty());
+    assert_eq!(row_ids(&f.search("银行")), HashSet::from([chinese.id]));
+    assert_eq!(
+        row_ids(&f.search("河堤")),
+        HashSet::from([retry.id.clone()])
+    );
+    retry.answer.clear();
+    f.db.save(&retry).unwrap();
+    assert!(f.search("河堤").rows.is_empty());
 }
 
 #[test]
@@ -137,7 +216,17 @@ fn pagination_is_deterministic_with_tied_timestamps_new_entries_and_deleted_curs
         f.db.save(&attempt).unwrap();
         expected.insert(attempt.id);
     }
-    let first = f.db.history_page(&HistoryQuery::default()).unwrap();
+    let filter = HistoryFilter {
+        search: "中文释义".into(),
+        ..Default::default()
+    };
+    let first =
+        f.db.history_page(&HistoryQuery {
+            filter: filter.clone(),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(first.attempts, expected.len() as u64);
     assert!(first.rows.len() <= PAGE_SIZE);
     assert!(first.next.is_some(), "remaining entries must be reachable");
     let mut seen = row_ids(&first);
@@ -149,6 +238,7 @@ fn pagination_is_deterministic_with_tied_timestamps_new_entries_and_deleted_curs
     newer.created_at = "2026-10-12T09:01:00Z".into();
     f.db.insert(&newer, &f.skill).unwrap();
     newer.status = AttemptStatus::Succeeded;
+    newer.answer = "中文释义".into();
     f.db.save(&newer).unwrap();
     f.db.delete_lookup(&first.rows.last().unwrap().entry.lookup_id)
         .unwrap();
@@ -156,8 +246,8 @@ fn pagination_is_deterministic_with_tied_timestamps_new_entries_and_deleted_curs
     while let Some(cursor) = next {
         let page =
             f.db.history_page(&HistoryQuery {
+                filter: filter.clone(),
                 before: Some(cursor),
-                ..Default::default()
             })
             .unwrap();
         assert!(page.rows.len() <= PAGE_SIZE);
@@ -271,80 +361,109 @@ fn deletion_is_disabled_for_an_active_version_hidden_by_filters() {
 }
 
 #[test]
-fn migration_from_phase_two_preserves_attempt_payloads_and_settings() {
-    let f = Fixture::new();
-    let path = f.root.path().join("legacy.sqlite3");
-    let mut attempt = Attempt::new("older result".into(), f.setup.clone(), f.skill.hash.clone());
-    attempt.status = AttemptStatus::Succeeded;
-    attempt.answer = "中文释义".into();
-    let payload = serde_json::to_string(&attempt).unwrap();
-    let preferences = Preferences {
-        version: 1,
-        model: f.setup.model.clone(),
-        effort: f.setup.effort.clone(),
-        fast_mode: true,
-        skill_path: f.setup.skill_path.clone(),
-        cli_path: None,
-        appearance: Default::default(),
-    };
-    {
-        let db = rusqlite::Connection::open(&path).unwrap();
-        db.execute_batch(include_str!("../migrations/001_initial.sql"))
+fn history_migrations_preserve_payloads_and_settings_and_backfill_translations() {
+    for version in [3, 4] {
+        let f = Fixture::new();
+        let path = f.root.path().join("legacy.sqlite3");
+        let mut attempt =
+            Attempt::new("older result".into(), f.setup.clone(), f.skill.hash.clone());
+        attempt.status = AttemptStatus::Succeeded;
+        attempt.answer = "中文释义\n\nCAFE\u{301}".into();
+        let payload = serde_json::to_string(&attempt).unwrap();
+        let preferences = Preferences {
+            version: 1,
+            model: f.setup.model.clone(),
+            effort: f.setup.effort.clone(),
+            fast_mode: true,
+            skill_path: f.setup.skill_path.clone(),
+            cli_path: None,
+            appearance: Default::default(),
+        };
+        {
+            let db = rusqlite::Connection::open(&path).unwrap();
+            db.execute_batch(include_str!("../migrations/001_initial.sql"))
+                .unwrap();
+            db.execute_batch(include_str!("../migrations/002_lookup_cache.sql"))
+                .unwrap();
+            db.execute_batch(include_str!("../migrations/003_settings.sql"))
+                .unwrap();
+            if version == 4 {
+                db.execute_batch(include_str!("../migrations/004_history.sql"))
+                    .unwrap();
+            }
+            db.execute(
+                "INSERT INTO skill_snapshots VALUES (?1,'dict','SKILL.md','fixture')",
+                [&f.skill.hash],
+            )
             .unwrap();
-        db.execute_batch(include_str!("../migrations/002_lookup_cache.sql"))
+            db.execute(
+                "INSERT INTO lookups VALUES (?1,?2,?2,'en_zh',?3,?2,'en_zh')",
+                rusqlite::params![attempt.lookup_id, attempt.input, attempt.created_at],
+            )
             .unwrap();
-        db.execute_batch(include_str!("../migrations/003_settings.sql"))
+            db.execute("INSERT INTO attempts(id,lookup_id,attempt_number,state,created_at,model,effort,skill_hash,payload) VALUES (?1,?2,1,'succeeded',?3,'fixture-model','low',?4,?5)", rusqlite::params![attempt.id, attempt.lookup_id, attempt.created_at, f.skill.hash, payload]).unwrap();
+            db.execute(
+                "INSERT INTO app_state VALUES ('preferences',?1)",
+                [serde_json::to_string(&preferences).unwrap()],
+            )
             .unwrap();
-        db.execute(
-            "INSERT INTO skill_snapshots VALUES (?1,'dict','SKILL.md','fixture')",
-            [&f.skill.hash],
-        )
-        .unwrap();
-        db.execute(
-            "INSERT INTO lookups VALUES (?1,?2,?2,'en_zh',?3,?2,'en_zh')",
-            rusqlite::params![attempt.lookup_id, attempt.input, attempt.created_at],
-        )
-        .unwrap();
-        db.execute("INSERT INTO attempts(id,lookup_id,attempt_number,state,created_at,model,effort,skill_hash,payload) VALUES (?1,?2,1,'succeeded',?3,'fixture-model','low',?4,?5)", rusqlite::params![attempt.id, attempt.lookup_id, attempt.created_at, f.skill.hash, payload]).unwrap();
-        db.execute(
-            "INSERT INTO app_state VALUES ('preferences',?1)",
-            [serde_json::to_string(&preferences).unwrap()],
-        )
-        .unwrap();
-    }
-    let migrated = Database::open(&path).unwrap();
-    let page = migrated
-        .history_page(&HistoryQuery {
-            filter: HistoryFilter {
-                search: "OLDER".into(),
+        }
+        let migrated = Database::open(&path).unwrap();
+        let page = migrated
+            .history_page(&HistoryQuery {
+                filter: HistoryFilter {
+                    search: "OLDER".into(),
+                    ..Default::default()
+                },
                 ..Default::default()
-            },
-            ..Default::default()
-        })
-        .unwrap();
-    assert_eq!(row_ids(&page), HashSet::from([attempt.id.clone()]));
-    assert_eq!(migrated.get(&attempt.id).unwrap().answer, attempt.answer);
-    assert_eq!(
-        migrated.read_state::<Preferences>("preferences").unwrap(),
-        Some(preferences.clone())
-    );
-    let db = rusqlite::Connection::open(&path).unwrap();
-    assert_eq!(
-        db.query_row("SELECT payload FROM attempts", [], |r| r
-            .get::<_, String>(0))
-            .unwrap(),
-        payload
-    );
-    drop(migrated);
-    let reopened = Database::open(&path).unwrap();
-    assert_eq!(
-        row_ids(&reopened.history_page(&HistoryQuery::default()).unwrap()),
-        row_ids(&page)
-    );
-    assert_eq!(
-        reopened.read_state::<Preferences>("preferences").unwrap(),
-        Some(preferences)
-    );
+            })
+            .unwrap();
+        assert_eq!(row_ids(&page), HashSet::from([attempt.id.clone()]));
+        for search in ["中文释义", "café"] {
+            let translated = migrated
+                .history_page(&HistoryQuery {
+                    filter: HistoryFilter {
+                        search: search.into(),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                })
+                .unwrap();
+            assert_eq!(row_ids(&translated), row_ids(&page));
+        }
+        assert_eq!(migrated.get(&attempt.id).unwrap().answer, attempt.answer);
+        assert_eq!(
+            migrated.read_state::<Preferences>("preferences").unwrap(),
+            Some(preferences.clone())
+        );
+        let db = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            db.query_row("SELECT payload FROM attempts", [], |r| r
+                .get::<_, String>(0))
+                .unwrap(),
+            payload
+        );
+        drop(migrated);
+        let reopened = Database::open(&path).unwrap();
+        assert_eq!(
+            row_ids(
+                &reopened
+                    .history_page(&HistoryQuery {
+                        filter: HistoryFilter {
+                            search: "中文释义".into(),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    })
+                    .unwrap()
+            ),
+            row_ids(&page)
+        );
+        assert_eq!(
+            reopened.read_state::<Preferences>("preferences").unwrap(),
+            Some(preferences)
+        );
+    }
 }
 
 #[test]
